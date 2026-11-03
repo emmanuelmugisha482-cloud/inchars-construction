@@ -30,7 +30,8 @@ LOGO = os.path.join(BASE_DIR, "assets", "logo.png")
 
 CEO, ACCOUNTANT, STORE, FIELD = "CEO", "Accountant", "Store manager", "Field manager"
 ROLES = [CEO, ACCOUNTANT, STORE, FIELD]
-SEE_ALL = (CEO, ACCOUNTANT)  # these roles see every field; the others only the fields given to them
+SEE_ALL = (CEO,)  # only the CEO sees every field; everybody else works on the fields given to them
+FUNDS_VISIBLE = (CEO,)  # funds received from clients are shown to these roles only
 
 DEFAULT_CATEGORIES = ["Wages & Salaries", "Cements & Steel", "Plumbing, Petrol & Electricity", "Painting & Transport",
                       "Stones, Sand & Bricks", "Parafo (Ceiling) & Water", "Welding & Ironmongery",
@@ -599,6 +600,10 @@ SIDEBAR_CSS = """
 </style>
 """
 # ---------- database tables ----------
+class Abort(Exception):
+    pass
+
+
 SCHEMA = [
     f"""CREATE TABLE IF NOT EXISTS sites(
         id {PK}, name TEXT UNIQUE NOT NULL, client TEXT, location TEXT, budget BIGINT DEFAULT 0, start_date TEXT,
@@ -614,6 +619,11 @@ SCHEMA = [
         id {PK}, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL, email TEXT UNIQUE)""",
     """CREATE TABLE IF NOT EXISTS reset_codes(
         user_id INTEGER PRIMARY KEY, code_hash TEXT NOT NULL, expires_at TEXT NOT NULL, attempts INTEGER DEFAULT 0)""",
+    f"CREATE TABLE IF NOT EXISTS materials(id {PK}, name TEXT UNIQUE NOT NULL, unit TEXT)",
+    f"""CREATE TABLE IF NOT EXISTS material_moves(
+        id {PK}, site_id INTEGER, material_id INTEGER, kind TEXT, qty DOUBLE PRECISION, moved_on TEXT, detail TEXT,
+        entered_by TEXT, entered_at TEXT)""",
+    "CREATE INDEX IF NOT EXISTS idx_mm_site ON material_moves(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_exp_site ON expenses(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_exp_date ON expenses(spent_on)",
     "CREATE INDEX IF NOT EXISTS idx_funds_site ON funds(site_id)",
@@ -668,12 +678,19 @@ def norm(s):
     return re.sub(r"[^a-z]", "", str(s).lower())
 
 
-def pretty(frame, money_cols=(), status_col=None):
-    """Thousands separators for money columns and colours for a status column."""
-    colors = {"Shortfall": "background-color:#fde2e2;color:#7a1f1f", "OK": "background-color:#e3f5e8;color:#1b5e30",
-              "No funds": "background-color:#eceff1;color:#455a64"}
+def _q(v):
+    return "" if pd.isna(v) else f"{v:,.2f}".rstrip("0").rstrip(".")
+
+
+def pretty(frame, money_cols=(), status_col=None, qty_cols=()):
+    """Thousands separators for money and quantity columns, and colours for a status column."""
+    red, green = "background-color:#fde2e2;color:#7a1f1f", "background-color:#e3f5e8;color:#1b5e30"
+    colors = {"Shortfall": red, "OK": green, "No funds": "background-color:#eceff1;color:#455a64",
+              "Out of stock": red, "In stock": green}
     try:
-        sty = frame.style.format({c: "{:,.0f}" for c in money_cols if c in frame.columns})
+        fmt = {c: "{:,.0f}" for c in money_cols if c in frame.columns}
+        fmt.update({c: _q for c in qty_cols if c in frame.columns})
+        sty = frame.style.format(fmt)
         if status_col in frame.columns:
             sty = (getattr(sty, "map", None) or sty.applymap)(lambda v: colors.get(v, ""), subset=[status_col])
         return sty
@@ -758,16 +775,16 @@ def no_field_message():
 
 # ---------- dashboard ----------
 def page_dashboard():
+    can_funds = st.session_state.role in FUNDS_VISIBLE
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
     ids = [int(i) for i in sites.id]
-    exp, fnd = load_expenses(ids), load_funds(ids)
+    exp = load_expenses(ids)
+    fnd = load_funds(ids) if can_funds else pd.DataFrame(columns=FUND_COLS)
     field, cat, scope, sel = filter_bar(sites, exp, "d")
     fscope = fnd if field == "All fields" else fnd[fnd.Field == field]
-    total, n = float(sel.Total.sum()), len(sel)
-    spent_all, funds_all = float(scope.Total.sum()), float(fscope.Amount.sum())
-    balance = funds_all - spent_all
+    total, n, spent_all = float(sel.Total.sum()), len(sel), float(scope.Total.sum())
     bsites = sites[sites.budget.fillna(0) > 0] if field == "All fields" else sites[(sites.name == field) & (sites.budget.fillna(0) > 0)]
     budget = float(bsites.budget.sum())  # only fields that have a budget are compared with it
     spent_budgeted = float(scope[scope.site_id.isin(bsites.id)].Total.sum())
@@ -782,31 +799,52 @@ def page_dashboard():
 
     st.subheader("Whole field" if field != "All fields" else "All fields together")
     st.caption("Not affected by the category and period filters.")
-    w = st.columns(5 if budget else 4)
-    w[0].metric("Funds received", money(funds_all))
-    w[1].metric("Recorded expenditure", money(spent_all))
-    w[2].metric("Balance / (shortfall)", ("-" if balance < 0 else "") + money(abs(balance)))
-    w[3].metric("Funds used", f"{spent_all / funds_all * 100:.0f}%" if funds_all else "no funds yet")
+    items = [("Recorded expenditure", money(spent_all))]
     if budget:
-        w[4].metric("Budget used", f"{spent_budgeted / budget * 100:.1f}%")
+        items += [("Budget", money(budget)), ("Budget used", f"{spent_budgeted / budget * 100:.1f}%")]
+    if can_funds:
+        funds_all = float(fscope.Amount.sum())
+        balance = funds_all - spent_all
+        items += [("Funds received", money(funds_all)), ("Balance / (shortfall)", ("-" if balance < 0 else "") + money(abs(balance))),
+                  ("Funds used", f"{spent_all / funds_all * 100:.0f}%" if funds_all else "no funds yet")]
+    for col, (label, value) in zip(st.columns(len(items)), items):
+        col.metric(label, value)
 
     if field == "All fields" and len(sites) > 1:
         st.subheader("Fields")
         per = sites[["id", "name", "client", "budget"]].copy()
-        spent, got, last = exp.groupby("site_id").Total.sum(), fnd.groupby("site_id").Amount.sum(), exp.groupby("site_id").Date.max()
-        per["Funds received"] = per.id.map(got).fillna(0).astype(int)
-        per["Spent"] = per.id.map(spent).fillna(0).astype(int)
-        per["Balance"] = per["Funds received"] - per["Spent"]
-        per["Funds used"] = [f"{s / f * 100:.0f}%" if f else "-" for s, f in zip(per.Spent, per["Funds received"])]
-        per["Last entry"] = per.id.map(last).fillna("")
-        per["Status"] = ["Shortfall" if b < 0 else ("No funds" if f == 0 else "OK")
-                         for b, f in zip(per.Balance, per["Funds received"])]
+        per["Spent"] = per.id.map(exp.groupby("site_id").Total.sum()).fillna(0).astype(int)
+        per["Budget used"] = [f"{s / b * 100:.1f}%" if b else "-" for s, b in zip(per.Spent, per.budget.fillna(0))]
+        per["Last entry"] = per.id.map(exp.groupby("site_id").Date.max()).fillna("")
+        per["budget"] = per.budget.fillna(0).astype(int)
+        cols, money_cols = ["Field", "Client", "Budget", "Spent", "Budget used", "Last entry"], ["Budget", "Spent"]
+        if can_funds:
+            per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0).astype(int)
+            per["Balance"] = per["Funds received"] - per["Spent"]
+            per["Funds used"] = [f"{s / f * 100:.0f}%" if f else "-" for s, f in zip(per.Spent, per["Funds received"])]
+            per["Status"] = ["Shortfall" if b < 0 else ("No funds" if f == 0 else "OK") for b, f in zip(per.Balance, per["Funds received"])]
+            cols = ["Field", "Client", "Budget", "Funds received", "Spent", "Balance", "Funds used", "Budget used", "Last entry", "Status"]
+            money_cols = ["Budget", "Funds received", "Spent", "Balance"]
         per = per.rename(columns={"name": "Field", "client": "Client", "budget": "Budget"})
         q = search_box("q_fields", "Search field or client", "Type part of a name…")
-        cols = ["Field", "Client", "Budget", "Funds received", "Spent", "Balance", "Funds used", "Last entry", "Status"]
-        wide(st.dataframe, pretty(match(per, ["Field", "Client"], q)[cols], ["Budget", "Funds received", "Spent", "Balance"],
-                                  "Status"), hide_index=True)
+        wide(st.dataframe, pretty(match(per, ["Field", "Client"], q)[cols], money_cols, "Status"), hide_index=True)
         hbar(per.sort_values("Spent", ascending=False).head(10)[["Field", "Spent"]], "Field", "Spent", "Spent (Frw)")
+
+    if st.session_state.role == CEO:  # progress of the materials on every field
+        st.subheader("Materials on site")
+        mv = load_moves(ids)
+        if mv.empty:
+            st.caption("No materials have been recorded yet.")
+        else:
+            recent, bal = str(date.today() - timedelta(days=30)), stock_balances(mv)
+            mat = pd.DataFrame({"Field": sites.name.values})
+            mat["Items in stock"] = mat.Field.map(bal[bal.Balance > 0].groupby("Field").size()).fillna(0).astype(int)
+            mat["Items out of stock"] = mat.Field.map(bal[bal.Balance <= 0].groupby("Field").size()).fillna(0).astype(int)
+            mat["Received (30 days)"] = mat.Field.map(mv[(mv.Type == "Received") & (mv.Date >= recent)].groupby("Field").size()).fillna(0).astype(int)
+            mat["Used (30 days)"] = mat.Field.map(mv[(mv.Type == "Used") & (mv.Date >= recent)].groupby("Field").size()).fillna(0).astype(int)
+            mat["Last movement"] = mat.Field.map(mv.groupby("Field").Date.max()).fillna("")
+            st.caption("Received and used show the number of lines recorded in the last 30 days. Open Material stock for the details.")
+            wide(st.dataframe, mat, hide_index=True)
 
     st.subheader("Category ranking")
     if sel.empty:
@@ -859,12 +897,13 @@ def add_expenses(site_id, cat_ids, entries, user):
 
 
 def delete_expenses(ids, role, user, uid):
-    """The Accountant can delete any entry. Others only their own entries of today, in their own fields."""
+    """The Accountant can delete any entry of their fields. Others only their own entries of today."""
     n = 0
     with conn() as c:
         for rid in ids:
             if role == ACCOUNTANT:
-                n += c.execute("DELETE FROM expenses WHERE id=?", (rid,)).rowcount
+                n += c.execute("DELETE FROM expenses WHERE id=? AND site_id IN (SELECT site_id FROM user_sites WHERE user_id=?)",
+                               (rid, uid)).rowcount
             else:
                 n += c.execute("""DELETE FROM expenses WHERE id=? AND entered_by=? AND SUBSTR(entered_at,1,10)=?
                                   AND site_id IN (SELECT site_id FROM user_sites WHERE user_id=?)""",
@@ -932,7 +971,7 @@ def page_expenses():
     tbl = shown[cols].copy()
     tbl["Remove"] = False
     ed2 = wide(st.data_editor, tbl, hide_index=True, key=f"{K('el')}_{len(shown)}", disabled=cols)
-    st.caption("Tick Remove, then press Delete. " + ("You can delete any entry." if role == ACCOUNTANT
+    st.caption("Tick Remove, then press Delete. " + ("You can delete any entry of your fields." if role == ACCOUNTANT
                                                        else "You can delete your own entries from today."))
     if st.button("Delete ticked entries"):
         ids = [int(i) for i, r in zip(shown.id, ed2["Remove"]) if r]
@@ -944,38 +983,35 @@ def page_expenses():
                  (f" {len(ids) - n} could not be deleted." if n < len(ids) else ""))
 
 
-# ---------- funds received ----------
+# ---------- funds received (CEO only) ----------
 def page_funds():
-    role, user = st.session_state.role, st.session_state.user
+    if st.session_state.role not in FUNDS_VISIBLE:
+        return st.error("Funds received can only be seen by the CEO.")
+    user = st.session_state.user
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
     site_ids = {r.name: int(r.id) for r in sites.itertuples()}
-    can_edit = role in (CEO, ACCOUNTANT)
-    if can_edit:
-        st.subheader("Record funds received")
-        a1, a2, a3 = st.columns([2, 2, 2])
-        field = a1.selectbox("Field", list(site_ids), key=K("ff"))
-        amount = a2.number_input("Amount (Frw)", min_value=1, step=1000, value=None, placeholder="Enter amount", key=K("fa"))
-        day = a3.date_input("Date received", date.today(), max_value=date.today(), key=K("fd"))
-        b1, b2 = st.columns(2)
-        source = b1.text_input("Received from", placeholder="For example the client name", key=K("fs"))
-        note = b2.text_input("Note (optional)", key=K("fn"))
-        if st.button("Save funds", type="primary"):
-            if not amount:
-                st.warning("Enter the amount.")
-            else:
-                run("INSERT INTO funds(site_id, amount, received_on, source, note, entered_by) VALUES(?,?,?,?,?,?)",
-                    (site_ids[field], int(amount), str(day), source.strip(), note.strip(), user))
-                done(f"{money(amount)} Frw recorded for {field}.")
+    st.subheader("Record funds received")
+    a1, a2, a3 = st.columns([2, 2, 2])
+    field = a1.selectbox("Field", list(site_ids), key=K("ff"))
+    amount = a2.number_input("Amount (Frw)", min_value=1, step=1000, value=None, placeholder="Enter amount", key=K("fa"))
+    day = a3.date_input("Date received", date.today(), max_value=date.today(), key=K("fd"))
+    b1, b2 = st.columns(2)
+    source = b1.text_input("Received from", placeholder="For example the client name", key=K("fs"))
+    note = b2.text_input("Note (optional)", key=K("fn"))
+    if st.button("Save funds", type="primary"):
+        if not amount:
+            st.warning("Enter the amount.")
+        else:
+            run("INSERT INTO funds(site_id, amount, received_on, source, note, entered_by) VALUES(?,?,?,?,?,?)",
+                (site_ids[field], int(amount), str(day), source.strip(), note.strip(), user))
+            done(f"{money(amount)} Frw recorded for {field}.")
     st.subheader("Funds received")
     q = search_box("q_funds", "Search field, source or note", "Type part of a name…")
     fnd = match(load_funds(list(site_ids.values())), ["Field", "Source", "Note"], q)
     st.caption(f"{len(fnd)} records, total {money(fnd.Amount.sum())} Frw")
     cols = ["Date", "Field", "Amount", "Source", "Note", "Entered by"]
-    if not can_edit:
-        wide(st.dataframe, pretty(fnd[cols], ["Amount"]), hide_index=True)
-        return
     tbl = fnd[cols].copy()
     tbl["Remove"] = False
     ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('fl')}_{len(fnd)}", disabled=cols)
@@ -990,6 +1026,293 @@ def page_funds():
             done(f"{len(ids)} record(s) deleted.")
 
 
+# ---------- materials on site (Store manager) ----------
+MOVE_COLS = ["id", "site_id", "material_id", "Date", "Field", "Material", "Unit", "Type", "Qty", "Detail", "Entered by"]
+
+
+def load_materials():
+    return df("SELECT id, name, unit FROM materials ORDER BY name")
+
+
+def load_moves(site_ids):
+    if not site_ids:
+        return pd.DataFrame(columns=MOVE_COLS)
+    return df(f"""SELECT m.id, m.site_id, m.material_id, m.moved_on AS "Date", s.name AS "Field", t.name AS "Material",
+                  t.unit AS "Unit", m.kind AS "Type", m.qty AS "Qty", m.detail AS "Detail", m.entered_by AS "Entered by"
+                  FROM material_moves m JOIN sites s ON s.id=m.site_id JOIN materials t ON t.id=m.material_id
+                  WHERE m.site_id IN ({','.join('?' * len(site_ids))}) ORDER BY m.moved_on DESC, m.id DESC""", tuple(site_ids))
+
+
+def stock_balances(mv):
+    """One row per field and material: received, used, count corrections and the balance."""
+    cols = ["site_id", "material_id", "Field", "Material", "Unit", "Received", "Used", "Corrected", "Balance"]
+    if mv.empty:
+        return pd.DataFrame(columns=cols)
+    q = pd.to_numeric(mv.Qty)
+    g = mv.assign(Qty=q, R=q.where(mv.Type == "Received", 0.0), U=(-q).where(mv.Type == "Used", 0.0),
+                  C=q.where(mv.Type == "Count", 0.0))
+    out = g.groupby(["site_id", "material_id", "Field", "Material", "Unit"], as_index=False).agg(
+        Received=("R", "sum"), Used=("U", "sum"), Corrected=("C", "sum"), Balance=("Qty", "sum"))
+    out["Status"] = ["In stock" if b > 1e-9 else "Out of stock" for b in out.Balance]
+    return out.sort_values(["Field", "Material"]).reset_index(drop=True)
+
+
+def parse_moves(ed, mat_ids):
+    ok, bad = [], []
+    for pos, (_, r) in enumerate(ed.iterrows(), start=1):
+        mat = r["Material"] if pd.notna(r["Material"]) else None
+        qty = pd.to_numeric(r["Qty"], errors="coerce")
+        detail = str(r["Detail"]).strip() if pd.notna(r["Detail"]) else ""
+        if not mat and (pd.isna(qty) or qty == 0) and not detail:
+            continue  # empty row
+        d = pd.to_datetime(r["Date"], errors="coerce")
+        d = date.today() if pd.isna(d) else d.date()
+        if mat not in mat_ids:
+            bad.append(f"Row {pos}: choose a material.")
+        elif pd.isna(qty) or qty <= 0:
+            bad.append(f"Row {pos}: the quantity must be above 0.")
+        elif d > date.today():
+            bad.append(f"Row {pos}: the date is in the future.")
+        else:
+            ok.append({"date": d, "material": mat, "qty": float(qty), "detail": detail})
+    return ok, bad
+
+
+def add_moves(site_id, mat_ids, kind, entries, user):
+    """Received adds to the stock and Used takes away. Returns an error text, or None when saved."""
+    sign, now = (1 if kind == "Received" else -1), datetime.now().isoformat(timespec="seconds")
+    try:
+        with conn() as c:
+            if kind == "Used":  # never use more than is in stock
+                need = {}
+                for e in entries:
+                    need[e["material"]] = need.get(e["material"], 0) + e["qty"]
+                for name, q in need.items():
+                    have = float(c.execute("SELECT COALESCE(SUM(qty), 0) AS b FROM material_moves WHERE site_id=? AND material_id=?",
+                                           (site_id, mat_ids[name])).fetchone()["b"])
+                    if q > have + 1e-9:
+                        raise Abort(f"{name.split(' (')[0]}: only {have:g} in stock.")
+            bulk_insert(c, "material_moves", ["site_id", "material_id", "kind", "qty", "moved_on", "detail", "entered_by", "entered_at"],
+                        [(site_id, mat_ids[e["material"]], kind, sign * e["qty"], str(e["date"]), e["detail"], user, now) for e in entries])
+    except Abort as e:
+        return str(e)
+    return None
+
+
+def count_stock(site_id, counted, note, user):
+    """counted = {material_id: counted quantity}. Saves the difference as a 'Count' correction."""
+    now, changed = datetime.now().isoformat(timespec="seconds"), 0
+    with conn() as c:
+        for mid, qty in counted.items():
+            have = float(c.execute("SELECT COALESCE(SUM(qty), 0) AS b FROM material_moves WHERE site_id=? AND material_id=?",
+                                   (site_id, mid)).fetchone()["b"])
+            if abs(qty - have) > 1e-9:
+                c.execute("INSERT INTO material_moves(site_id, material_id, kind, qty, moved_on, detail, entered_by, entered_at) "
+                          "VALUES(?,?,?,?,?,?,?,?)", (site_id, mid, "Count", qty - have, str(date.today()),
+                                                      f"Stock count: {note}".strip(), user, now))
+                changed += 1
+    return changed
+
+
+def pick_field(sites, key):
+    if len(sites) == 1:
+        st.markdown(f"**Field:** {sites.name.iloc[0]}")
+        return sites.name.iloc[0]
+    return st.selectbox("Field", sites.name.tolist(), key=key)
+
+
+def move_columns(kind, labels):
+    return {"Date": st.column_config.DateColumn("Date", max_value=date.today(), format="YYYY-MM-DD"),
+            "Material": st.column_config.SelectboxColumn("Material", options=labels, required=False),
+            "Qty": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.01),
+            "Detail": st.column_config.TextColumn("Supplier / delivery note" if kind == "Received" else "Used for (work or activity)")}
+
+
+def recent_moves(site_id, kind, key):
+    st.subheader("Recent entries")
+    q = search_box(key, "Search material or note", "Type part of a name…")
+    mv = load_moves([site_id])
+    mv = match(mv[mv.Type == kind], ["Material", "Detail", "Entered by"], q).head(100)
+    wide(st.dataframe, pretty(mv.assign(Qty=mv.Qty.abs())[["Date", "Material", "Unit", "Qty", "Detail", "Entered by"]],
+                              qty_cols=["Qty"]), hide_index=True)
+
+
+def page_receive():
+    if st.session_state.role != STORE:
+        return st.error("This page is for the Store manager.")
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    field = pick_field(sites, K("rf"))
+    sid = int(sites[sites.name == field].id.iloc[0])
+    mats = load_materials()
+    with st.expander("Add a new material to the list"):
+        n1, n2, n3 = st.columns([3, 2, 1])
+        nm = n1.text_input("Material name", key=K("mn"))
+        nu = n2.text_input("Unit", placeholder="bags, pcs, kg, m3, litres, tonnes…", key=K("mu"))
+        n3.write("")
+        if n3.button("Add"):
+            if not nm.strip() or not nu.strip():
+                st.warning("Write the material name and its unit.")
+            else:
+                try:
+                    run("INSERT INTO materials(name, unit) VALUES(?,?)", (nm.strip(), nu.strip()))
+                    done(f"{nm.strip()} added to the list.")
+                except IntegrityErrors:
+                    st.error("That material is already in the list.")
+    if mats.empty:
+        return st.info("The materials list is empty. Add your first material above.")
+    labels = {f"{r.name} ({r.unit})": int(r.id) for r in mats.itertuples()}
+    st.subheader("Materials received")
+    st.caption("One line for each delivery. Add more lines with the + at the bottom of the table.")
+    grid = pd.DataFrame({"Date": [date.today()] * 5, "Material": [None] * 5, "Qty": [0.0] * 5, "Detail": [""] * 5})
+    ed = wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K("rg"), column_config=move_columns("Received", list(labels)))
+    ok, bad = parse_moves(ed, labels)
+    if ok:
+        st.write(f"**{len(ok)} line(s) ready to save.**")
+    for msg in bad:
+        st.warning(msg)
+    if st.button("Save received materials", type="primary"):
+        if bad:
+            st.error("Please correct the lines marked above.")
+        elif not ok:
+            st.info("Nothing to save yet.")
+        else:
+            add_moves(sid, labels, "Received", ok, st.session_state.user)
+            done(f"{len(ok)} delivery line(s) saved for {field}.")
+    recent_moves(sid, "Received", "q_rec")
+
+
+def page_use():
+    if st.session_state.role != STORE:
+        return st.error("This page is for the Store manager.")
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    field = pick_field(sites, K("uf"))
+    sid = int(sites[sites.name == field].id.iloc[0])
+    bal = stock_balances(load_moves([sid]))
+    avail = bal[bal.Balance > 1e-9]
+    if avail.empty:
+        return st.info("There is nothing in stock yet. Record the materials received first.")
+    labels = {f"{r.Material} ({r.Unit}) - {r.Balance:g} in stock": int(r.material_id) for r in avail.itertuples()}
+    st.subheader("Materials used")
+    st.caption("One line for each use. You cannot use more than the quantity in stock.")
+    grid = pd.DataFrame({"Date": [date.today()] * 5, "Material": [None] * 5, "Qty": [0.0] * 5, "Detail": [""] * 5})
+    ed = wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K("ug"), column_config=move_columns("Used", list(labels)))
+    ok, bad = parse_moves(ed, labels)
+    if ok:
+        st.write(f"**{len(ok)} line(s) ready to save.**")
+    for msg in bad:
+        st.warning(msg)
+    if st.button("Save used materials", type="primary"):
+        if bad:
+            st.error("Please correct the lines marked above.")
+        elif not ok:
+            st.info("Nothing to save yet.")
+        else:
+            err = add_moves(sid, labels, "Used", ok, st.session_state.user)
+            if err:
+                st.error(err)
+            else:
+                done(f"{len(ok)} usage line(s) saved for {field}.")
+    recent_moves(sid, "Used", "q_use")
+
+
+def page_count():
+    if st.session_state.role != STORE:
+        return st.error("This page is for the Store manager.")
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    field = pick_field(sites, K("cf"))
+    sid = int(sites[sites.name == field].id.iloc[0])
+    mats = load_materials()
+    if mats.empty:
+        return st.info("The materials list is empty.")
+    st.write("Count what is really in the store. Search for a material, type the counted quantity, then search for the "
+             "next one. Your counts are kept while you search. Leave **Counted** empty for materials you did not count.")
+    bal = stock_balances(load_moves([sid]))
+    have = dict(zip(bal.material_id.astype(int), bal.Balance)) if len(bal) else {}
+    base = mats.assign(system=[float(have.get(int(i), 0.0)) for i in mats.id])
+    counts = st.session_state.setdefault("mcount", {})  # {(field id, material id): counted}
+    q = search_box("q_count", "Search material", "Type part of a material name…")
+    shown = match(base, ["name"], q)
+    grid = pd.DataFrame({"Material": shown.name.values, "Unit": shown.unit.values, "In system": shown.system.values,
+                         "Counted": pd.array([counts.get((sid, int(i))) for i in shown.id], dtype="Float64")})
+    ed = wide(st.data_editor, grid, hide_index=True, height=420, disabled=["Material", "Unit", "In system"],
+              column_config={"Counted": st.column_config.NumberColumn("Counted", min_value=0.0, step=0.01)},
+              key=f"mc{K('c')}_{sid}_{q}")
+    for i, c in zip(shown.id, ed["Counted"]):
+        if pd.notna(c):
+            counts[(sid, int(i))] = float(c)
+        else:
+            counts.pop((sid, int(i)), None)
+    sysq, names = dict(zip(base.id.astype(int), base.system)), dict(zip(base.id.astype(int), base.name))
+    diff = pd.DataFrame([{"Material": names[m], "In system": sysq[m], "Counted": c, "Difference": c - sysq[m]}
+                         for (s_, m), c in counts.items() if s_ == sid and m in sysq and abs(c - sysq[m]) > 1e-9])
+    if len(diff):
+        st.write(f"**{len(diff)} material(s) will be corrected:**")
+        wide(st.dataframe, pretty(diff, qty_cols=["In system", "Counted", "Difference"]), hide_index=True)
+    reason = st.text_input("Note", "Physical count", key=K("cn"))
+    b1, b2 = st.columns(2)
+    if b1.button("Save stock count", type="primary", disabled=diff.empty):
+        n = count_stock(sid, {m: c for (s_, m), c in counts.items() if s_ == sid and m in sysq}, reason, st.session_state.user)
+        for key in [k for k in counts if k[0] == sid]:
+            counts.pop(key)
+        done(f"Stock corrected for {n} material(s).")
+    if b2.button("Clear my counts", disabled=not any(k[0] == sid for k in counts)):
+        for key in [k for k in counts if k[0] == sid]:
+            counts.pop(key)
+        done("Counts cleared.")
+
+
+def page_stock():
+    """Stock balance of the materials. The Store manager's dashboard, and a read-only view for the others."""
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    ids = [int(i) for i in sites.id]
+    mv = load_moves(ids)
+    f1, f2 = st.columns([2, 3])
+    if len(sites) > 1:
+        field = f1.selectbox("Field", ["All fields"] + sites.name.tolist(), key="ms_field")
+    else:
+        field = sites.name.iloc[0]
+        f1.markdown(f"**Field:** {field}")
+    with f2:
+        q = search_box("q_ms", "Search material", "Type part of a material name…")
+    view = mv if field == "All fields" else mv[mv.Field == field]
+    bal = stock_balances(view)
+    recent = str(date.today() - timedelta(days=30))
+    k = st.columns(4)
+    k[0].metric("Materials in stock", int((bal.Balance > 1e-9).sum()))
+    k[1].metric("Out of stock", int((bal.Balance <= 1e-9).sum()))
+    k[2].metric("Received (30 days)", int(((view.Type == "Received") & (view.Date >= recent)).sum()))
+    k[3].metric("Used (30 days)", int(((view.Type == "Used") & (view.Date >= recent)).sum()))
+    st.subheader("Stock balance")
+    shown = match(bal, ["Material"], q)
+    cols = (["Field"] if field == "All fields" else []) + ["Material", "Unit", "Received", "Used", "Corrected", "Balance", "Status"]
+    if bal.empty:
+        st.info("No materials have been recorded yet.")
+    else:
+        wide(st.dataframe, pretty(shown[cols], status_col="Status", qty_cols=["Received", "Used", "Corrected", "Balance"]), hide_index=True)
+    st.subheader("Movements")
+    m1, m2 = st.columns([2, 3])
+    kind = m1.radio("Show", ["All", "Received", "Used", "Count"], horizontal=True, key="ms_kind")
+    with m2:
+        q2 = search_box("q_mv", "Search material, note or person", "Type part of a name…")
+    mvs = view if kind == "All" else view[view.Type == kind]
+    mvs = match(mvs, ["Material", "Detail", "Entered by"], q2)
+    st.caption(f"{len(mvs)} movements" + (" (showing the latest 300)" if len(mvs) > 300 else ""))
+    mcols = ["Date", "Field", "Material", "Unit", "Type", "Qty", "Detail", "Entered by"]
+    wide(st.dataframe, pretty(mvs.head(300)[mcols], qty_cols=["Qty"]), hide_index=True)
+    if not bal.empty:
+        st.download_button(":material/download: Download stock report (Excel)",
+                           to_excel({"Stock balance": bal.drop(columns=["site_id", "material_id"]), "Movements": view[mcols]}),
+                           f"material_stock_{date.today()}.xlsx", mime=XLSX, key="dl_stock")
+
+
 # ---------- fields and categories ----------
 def add_site(name, client, location, budget, start):
     with conn() as c:
@@ -998,8 +1321,15 @@ def add_site(name, client, location, budget, start):
 
 
 def page_setup():
-    if st.session_state.role not in SEE_ALL:
+    role = st.session_state.role
+    if role not in (CEO, ACCOUNTANT):
         return st.error("This page is for the CEO and the Accountant.")
+    if role == CEO:
+        setup_fields()
+    setup_categories()
+
+
+def setup_fields():
     st.subheader("Fields")
     st.caption("A field is one construction project or site.")
     a1, a2, a3 = st.columns(3)
@@ -1032,6 +1362,9 @@ def page_setup():
                     c.execute("UPDATE sites SET client=?, location=?, budget=?, status=? WHERE id=?",
                               (cl or "", lo or "", int(0 if pd.isna(bu) else bu), stt, int(i)))
             done("Fields saved.")
+
+
+def setup_categories():
     st.subheader("Categories")
     cats = categories_df()
     q = search_box("q_cats", "Search category", "Type part of a name…")
@@ -1133,8 +1466,9 @@ def import_costs(site_id, rows, user, fname, funds=None, funds_date=None):
 
 
 def page_import():
-    if st.session_state.role != ACCOUNTANT:
-        return st.error("Only the Accountant can import workbooks.")
+    role = st.session_state.role
+    if role not in (CEO, ACCOUNTANT):
+        return st.error("Only the CEO and the Accountant can import workbooks.")
     st.write("Upload your cost workbook (one sheet per cost category, with a SUMMARY sheet). Every row is checked "
              "before anything is saved.")
     up = st.file_uploader("Excel workbook (.xlsx)", type=["xlsx"], key=K("imp"))
@@ -1153,16 +1487,19 @@ def page_import():
         st.warning(f"{skipped} row(s) have no valid date and will not be imported.")
     if (checks.Check == "Differs").any():
         st.warning("Some sheets differ from their own grand total (rows without a date or an amount). Check them in Excel.")
-    sites = df("SELECT id, name FROM sites ORDER BY name")
+    sites = visible_sites()
     site_ids = dict(zip(sites.name, sites.id.astype(int)))
-    target = st.selectbox("Import into which field?", ["New field…"] + list(site_ids), key=K("it"))
+    options = (["New field…"] if role == CEO else []) + list(site_ids)
+    if not options:
+        return no_field_message()
+    target = st.selectbox("Import into which field?", options, key=K("it"))
     new_name = new_client = ""
     if target == "New field…":
         n1, n2 = st.columns(2)
         new_name = n1.text_input("New field name", key=K("inn"))
         new_client = n2.text_input("Client", key=K("inc"))
     add_funds = False
-    if funds:
+    if funds and role in FUNDS_VISIBLE:
         add_funds = st.checkbox(f"Also record the funds received found in the SUMMARY sheet ({money(funds)} Frw)", value=True, key=K("ifd"))
     again = True
     if target != "New field…":
@@ -1190,23 +1527,24 @@ def page_reports():
     if sites.empty:
         return no_field_message()
     ids = [int(i) for i in sites.id]
-    exp, fnd = load_expenses(ids), load_funds(ids)
+    exp = load_expenses(ids)
     field, cat, scope, sel = filter_bar(sites, exp, "r")
     if sel.empty:
         return st.info("No spending in this selection.")
     by_cat = sel.groupby("Category").agg(Amount=("Total", "sum"), Transactions=("Total", "size")).reset_index().sort_values("Amount", ascending=False)
     by_cat["Share %"] = (by_cat.Amount / by_cat.Amount.sum() * 100).round(1)
     by_month = sel.assign(Month=sel.Date.str[:7]).groupby("Month").Total.sum().reset_index().rename(columns={"Total": "Amount"})
-    per = sites.rename(columns={"name": "Field"})[["id", "Field"]].copy()
-    per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0).astype(int)
-    per["Spent"] = per.id.map(exp.groupby("site_id").Total.sum()).fillna(0).astype(int)
-    per["Balance"] = per["Funds received"] - per["Spent"]
-    if field != "All fields":
-        per = per[per.Field == field]
     st.write(f"**{len(sel)} transactions, total {money(sel.Total.sum())} Frw**")
     wide(st.dataframe, pretty(by_cat, ["Amount"]), hide_index=True)
-    sheets = {"By category": by_cat, "By month": by_month, "Funds and balance": per.drop(columns="id"),
+    sheets = {"By category": by_cat, "By month": by_month,
               "Transactions": sel[["Date", "Field", "Category", "Item", "Qty", "Unit price", "Total", "Entered by"]]}
+    if st.session_state.role in FUNDS_VISIBLE:  # funds received are for the CEO only
+        fnd = load_funds(ids)
+        per = sites.rename(columns={"name": "Field"})[["id", "Field"]].copy()
+        per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0).astype(int)
+        per["Spent"] = per.id.map(exp.groupby("site_id").Total.sum()).fillna(0).astype(int)
+        per["Balance"] = per["Funds received"] - per["Spent"]
+        sheets["Funds and balance"] = (per if field == "All fields" else per[per.Field == field]).drop(columns="id")
     st.download_button(":material/download: Download this report (Excel)", to_excel(sheets),
                        f"report_{norm(field) or 'all'}_{date.today()}.xlsx", mime=XLSX, key="dl_rep")
 
@@ -1239,7 +1577,7 @@ def page_users():
         nr = a2.selectbox("Role", ROLES, index=3, key=K("nr"))
         ne = a1.text_input("Email (optional, used to reset a forgotten password)", key=K("ne"))
         npw = a2.text_input("Temporary password (at least 8 characters)", type="password", key=K("np"))
-        ns = st.multiselect("Fields this user works on", list(site_ids), key=K("ns")) if nr in (STORE, FIELD) else []
+        ns = st.multiselect("Fields this user works on", list(site_ids), key=K("ns")) if nr != CEO else []
         if st.button("Add user"):
             err = add_user(nu, nr, ne, npw)
             if err:
@@ -1253,7 +1591,7 @@ def page_users():
         who = st.selectbox("User", list(labels), index=None, placeholder="Choose a user", key=K("wu"))
         if who:
             uid, role, uname = labels[who]
-            if role in (STORE, FIELD):
+            if role != CEO:
                 cur = st.multiselect("Fields this user works on", list(site_ids), default=mine.get(uid, []), key=K(f"wf{uid}"))
                 if st.button("Save fields"):
                     set_user_sites(uid, [site_ids[n] for n in cur])
@@ -1278,18 +1616,21 @@ def page_users():
 
 # ---------- main ----------
 PAGES = {
-    CEO: [("dashboard", "Dashboard", "dashboard"), ("expenses", "Expenses", "receipt_long"),
-          ("funds", "Funds received", "payments"), ("setup", "Fields & categories", "construction"),
+    CEO: [("dashboard", "Dashboard", "dashboard"), ("stock", "Material stock", "inventory_2"),
+          ("expenses", "Expenses", "receipt_long"), ("funds", "Funds received", "payments"),
+          ("import", "Import from Excel", "upload_file"), ("setup", "Fields & categories", "construction"),
           ("reports", "Reports", "assessment"), ("users", "Users", "group")],
     ACCOUNTANT: [("dashboard", "Dashboard", "dashboard"), ("expenses", "Expenses", "receipt_long"),
-                 ("funds", "Funds received", "payments"), ("import", "Import from Excel", "upload_file"),
-                 ("setup", "Fields & categories", "construction"), ("reports", "Reports", "assessment")],
+                 ("import", "Import from Excel", "upload_file"), ("stock", "Material stock", "inventory_2"),
+                 ("setup", "Categories", "construction"), ("reports", "Reports", "assessment")],
+    FIELD: [("dashboard", "Dashboard", "dashboard"), ("expenses", "Expenses", "receipt_long"),
+            ("stock", "Material stock", "inventory_2"), ("reports", "Reports", "assessment")],
+    STORE: [("stock", "Dashboard", "dashboard"), ("receive", "Materials received", "move_to_inbox"),
+            ("use", "Materials used", "outbox"), ("count", "Stock count", "fact_check")],
 }
-for _r in (STORE, FIELD):
-    PAGES[_r] = [("dashboard", "Dashboard", "dashboard"), ("expenses", "Expenses", "receipt_long"),
-                 ("reports", "Reports", "assessment")]
 RENDER = {"dashboard": page_dashboard, "expenses": page_expenses, "funds": page_funds, "import": page_import,
-          "setup": page_setup, "reports": page_reports, "users": page_users}
+          "setup": page_setup, "reports": page_reports, "users": page_users, "stock": page_stock,
+          "receive": page_receive, "use": page_use, "count": page_count}
 
 
 def main():
