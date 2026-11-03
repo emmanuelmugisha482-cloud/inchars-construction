@@ -458,8 +458,14 @@ def login():
         st.markdown("## Welcome back")
         st.markdown('<div class="sub">Sign in to continue.</div>', unsafe_allow_html=True)
         if not users_exist():
-            st.warning("No accounts exist yet. The owner must add a [first_manager] section to the app "
-                       "secrets (see the README), then reload this page.")
+            if not IS_PG:
+                st.error("The online database is not connected: DATABASE_URL was not found in the secrets. "
+                         "Do not enter any data yet.")
+            if not all(first_manager()[:2]):
+                st.warning("No accounts exist yet, and the [first_manager] section (with username and password) "
+                           "was not found in the secrets. Add it, save, then reboot the app.")
+            else:
+                st.warning("No accounts exist yet. Reboot the app and try again.")
         with st.form("login_form"):
             u = st.text_input("User name")
             p = st.text_input("Password", type="password")
@@ -640,11 +646,18 @@ def init_db():
                 c.execute(s)
         if c.execute("SELECT COUNT(*) AS n FROM categories").fetchone()["n"] == 0:
             bulk_insert(c, "categories", ["name"], [(n,) for n in DEFAULT_CATEGORIES])
+
+
+def seed_first_manager():
+    """Creates the CEO account from the secrets while there are no users. It is checked at every visit to the
+    login page, so adding the secrets after the first start also works."""
+    u, p, e = first_manager()
+    if not (u and p):
+        return
+    with conn() as c:
         if c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 0:
-            u, p, e = first_manager()
-            if u and p:
-                c.execute("INSERT INTO users(username, password_hash, role, email) VALUES(?,?,?,?)",
-                          (u.strip(), hash_pw(p), CEO, (e or "").strip().lower() or None))
+            c.execute("INSERT INTO users(username, password_hash, role, email) VALUES(?,?,?,?)",
+                      (u.strip(), hash_pw(p), CEO, (e or "").strip().lower() or None))
 
 
 def bulk_insert(c, table, cols, data, chunk=50):
@@ -1636,6 +1649,8 @@ RENDER = {"dashboard": page_dashboard, "expenses": page_expenses, "funds": page_
 def main():
     init_db()
     if "user" not in st.session_state:
+        if not users_exist():
+            seed_first_manager()
         login()
         return
     me = get_user(st.session_state.uid)
