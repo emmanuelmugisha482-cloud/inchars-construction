@@ -629,6 +629,11 @@ SCHEMA = [
     f"""CREATE TABLE IF NOT EXISTS material_moves(
         id {PK}, site_id INTEGER, material_id INTEGER, kind TEXT, qty DOUBLE PRECISION, moved_on TEXT, detail TEXT,
         entered_by TEXT, entered_at TEXT)""",
+    f"""CREATE TABLE IF NOT EXISTS material_requests(
+        id {PK}, batch INTEGER, site_id INTEGER, material_id INTEGER, qty_requested DOUBLE PRECISION,
+        qty_approved DOUBLE PRECISION, qty_delivered DOUBLE PRECISION, status TEXT DEFAULT 'Pending', needed_by TEXT,
+        requested_on TEXT, requested_by TEXT, decided_on TEXT, decided_by TEXT, note TEXT, reason TEXT, delivered_on TEXT)""",
+    "CREATE INDEX IF NOT EXISTS idx_mr_site ON material_requests(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_mm_site ON material_moves(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_exp_site ON expenses(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_exp_date ON expenses(spent_on)",
@@ -699,7 +704,8 @@ def pretty(frame, money_cols=(), status_col=None, qty_cols=()):
     """Thousands separators for money and quantity columns, and colours for a status column."""
     red, green = "background-color:#fde2e2;color:#7a1f1f", "background-color:#e3f5e8;color:#1b5e30"
     colors = {"Shortfall": red, "OK": green, "No funds": "background-color:#eceff1;color:#455a64",
-              "Out of stock": red, "In stock": green}
+              "Out of stock": red, "In stock": green, "Rejected": red, "Delivered": green,
+              "Pending": "background-color:#fff3d6;color:#7a4a00", "Approved": "background-color:#dbeeff;color:#0b3a66"}
     try:
         fmt = {c: "{:,.0f}" for c in money_cols if c in frame.columns}
         fmt.update({c: _q for c in qty_cols if c in frame.columns})
@@ -1150,15 +1156,8 @@ def recent_moves(site_id, kind, key):
                               qty_cols=["Qty"]), hide_index=True)
 
 
-def page_receive():
-    if st.session_state.role != STORE:
-        return st.error("This page is for the Store manager.")
-    sites = visible_sites()
-    if sites.empty:
-        return no_field_message()
-    field = pick_field(sites, K("rf"))
-    sid = int(sites[sites.name == field].id.iloc[0])
-    mats = load_materials()
+def add_material_box():
+    """Store manager: add a material (name and unit) to the shared materials list."""
     with st.expander("Add a new material to the list"):
         n1, n2, n3 = st.columns([3, 2, 1])
         nm = n1.text_input("Material name", key=K("mn"))
@@ -1173,6 +1172,18 @@ def page_receive():
                     done(f"{nm.strip()} added to the list.")
                 except IntegrityErrors:
                     st.error("That material is already in the list.")
+
+
+def page_receive():
+    if st.session_state.role != STORE:
+        return st.error("This page is for the Store manager.")
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    field = pick_field(sites, K("rf"))
+    sid = int(sites[sites.name == field].id.iloc[0])
+    mats = load_materials()
+    add_material_box()
     if mats.empty:
         return st.info("The materials list is empty. Add your first material above.")
     labels = {f"{r.name} ({r.unit})": int(r.id) for r in mats.itertuples()}
@@ -1324,6 +1335,277 @@ def page_stock():
         st.download_button(":material/download: Download stock report (Excel)",
                            to_excel({"Stock balance": bal.drop(columns=["site_id", "material_id"]), "Movements": view[mcols]}),
                            f"material_stock_{date.today()}.xlsx", mime=XLSX, key="dl_stock")
+
+
+# ---------- material requests ----------
+REQ_COLS = ["id", "batch", "site_id", "material_id", "Date", "Field", "Material", "Unit", "Requested", "Approved",
+            "Delivered", "Status", "Needed by", "Requested by", "Decided by", "Note", "Reason"]
+
+
+def load_mat_requests(site_ids):
+    if not site_ids:
+        return pd.DataFrame(columns=REQ_COLS)
+    return df(f"""SELECT r.id, r.batch, r.site_id, r.material_id, r.requested_on AS "Date", s.name AS "Field",
+                  t.name AS "Material", t.unit AS "Unit", r.qty_requested AS "Requested", r.qty_approved AS "Approved",
+                  r.qty_delivered AS "Delivered", r.status AS "Status", r.needed_by AS "Needed by",
+                  r.requested_by AS "Requested by", r.decided_by AS "Decided by", r.note AS "Note", r.reason AS "Reason"
+                  FROM material_requests r JOIN sites s ON s.id=r.site_id JOIN materials t ON t.id=r.material_id
+                  WHERE r.site_id IN ({','.join('?' * len(site_ids))}) ORDER BY r.batch DESC, t.name""", tuple(site_ids))
+
+
+def parse_req(ed, labels):
+    ok, bad = [], []
+    for pos, (_, r) in enumerate(ed.iterrows(), start=1):
+        mat = r["Material"] if pd.notna(r["Material"]) else None
+        qty = pd.to_numeric(r["Qty"], errors="coerce")
+        note = str(r["Note"]).strip() if pd.notna(r["Note"]) else ""
+        if not mat and (pd.isna(qty) or qty == 0) and not note:
+            continue  # empty row
+        if mat not in labels:
+            bad.append(f"Row {pos}: choose a material.")
+        elif pd.isna(qty) or qty <= 0:
+            bad.append(f"Row {pos}: the quantity must be above 0.")
+        else:
+            ok.append({"material": mat, "qty": float(qty), "note": note})
+    return ok, bad
+
+
+def create_mat_request(site_id, labels, items, needed_by, user):
+    """All lines go into one request. Its number is the id of its first line."""
+    first, today, b = True, str(date.today()), 0
+    with conn() as c:
+        for e in items:
+            vals = (site_id, labels[e["material"]], e["qty"], str(needed_by), today, user, e["note"])
+            if first:
+                b = c.execute("INSERT INTO material_requests(batch, site_id, material_id, qty_requested, needed_by, requested_on, "
+                              "requested_by, note) VALUES(0,?,?,?,?,?,?,?) RETURNING id", vals).fetchone()["id"]
+                c.execute("UPDATE material_requests SET batch=? WHERE id=?", (b, b))
+                first = False
+            else:
+                c.execute("INSERT INTO material_requests(batch, site_id, material_id, qty_requested, needed_by, requested_on, "
+                          "requested_by, note) VALUES(?,?,?,?,?,?,?,?)", (b,) + vals)
+    return b
+
+
+def update_mat_pending(user, changes, removes):
+    """The person who asked can still change or delete their own lines while they are pending."""
+    skipped = 0
+    with conn() as c:
+        for rid in removes:
+            skipped += c.execute("DELETE FROM material_requests WHERE id=? AND status='Pending' AND requested_by=?",
+                                 (rid, user)).rowcount == 0
+        for rid, q in changes.items():
+            skipped += c.execute("UPDATE material_requests SET qty_requested=? WHERE id=? AND status='Pending' AND requested_by=?",
+                                 (q, rid, user)).rowcount == 0
+    return skipped
+
+
+def decide_mat_requests(decisions, user):
+    """CEO. decisions = {request id: (quantity to approve, reason)}. Quantity 0 refuses the line."""
+    today = str(date.today())
+    try:
+        with conn() as c:
+            for rid, (q, why) in decisions.items():
+                if q > 0:
+                    n = c.execute("UPDATE material_requests SET status='Approved', qty_approved=?, decided_on=?, decided_by=? "
+                                  "WHERE id=? AND status='Pending'", (q, today, user, rid)).rowcount
+                else:
+                    n = c.execute("UPDATE material_requests SET status='Rejected', qty_approved=0, decided_on=?, decided_by=?, "
+                                  "reason=? WHERE id=? AND status='Pending'", (today, user, why or "Not approved", rid)).rowcount
+                if n != 1:
+                    raise Abort("Some of these requests were already handled or cancelled. Please refresh the page.")
+    except Abort as e:
+        return str(e)
+    return None
+
+
+def deliver_mat_lines(deliveries, user, uid):
+    """Store manager. deliveries = {request id: quantity received}. Adds the quantity to the stock of the field."""
+    now, n = datetime.now().isoformat(timespec="seconds"), 0
+    with conn() as c:
+        for rid, qty in deliveries.items():
+            row = c.execute("""SELECT site_id, material_id, batch FROM material_requests WHERE id=? AND status='Approved'
+                               AND site_id IN (SELECT site_id FROM user_sites WHERE user_id=?)""", (rid, uid)).fetchone()
+            if row is None or qty <= 0:
+                continue
+            c.execute("INSERT INTO material_moves(site_id, material_id, kind, qty, moved_on, detail, entered_by, entered_at) "
+                      "VALUES(?,?,?,?,?,?,?,?)", (row["site_id"], row["material_id"], "Received", qty, str(date.today()),
+                                                  f"Request #{row['batch']}", user, now))
+            c.execute("UPDATE material_requests SET status='Delivered', qty_delivered=?, delivered_on=? WHERE id=?",
+                      (qty, str(date.today()), rid))
+            n += 1
+    return n
+
+
+def request_list(reqs, prefix):
+    """Search and status filter for a table of requests."""
+    c1, c2 = st.columns([2, 3])
+    status = c1.radio("Show", ["All", "Pending", "Approved", "Delivered", "Rejected"], horizontal=True, key=f"{prefix}_st")
+    with c2:
+        q = search_box(f"{prefix}_q", "Search material, field or person", "Type part of a name…")
+    view = reqs if status == "All" else reqs[reqs.Status == status]
+    view = match(view, ["Material", "Field", "Requested by", "Decided by"], q)
+    cols = ["batch", "Date", "Field", "Material", "Unit", "Requested", "Approved", "Delivered", "Status", "Needed by",
+            "Requested by", "Decided by", "Reason"]
+    wide(st.dataframe, pretty(view[cols].rename(columns={"batch": "Request #"}), status_col="Status",
+                              qty_cols=["Requested", "Approved", "Delivered"]), hide_index=True)
+
+
+def page_mat_requests():
+    """Store manager and Field manager ask for materials. The Accountant can see what was approved."""
+    role, user, uid = st.session_state.role, st.session_state.user, st.session_state.uid
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    ids = [int(i) for i in sites.id]
+    if role in (STORE, FIELD):
+        field = pick_field(sites, K("qf"))
+        sid = int(sites[sites.name == field].id.iloc[0])
+        if role == STORE:
+            add_material_box()
+        mats = load_materials()
+        if mats.empty:
+            st.info("The materials list is empty." + (" Add the first material above." if role == STORE
+                                                         else " Ask the Store manager to add the materials."))
+        else:
+            labels = {f"{r.name} ({r.unit})": int(r.id) for r in mats.itertuples()}
+            st.subheader("New request")
+            needed = st.date_input("Needed by", date.today() + timedelta(days=7), min_value=date.today(), key=K("qd"))
+            grid = pd.DataFrame({"Material": [None] * 4, "Qty": [0.0] * 4, "Note": [""] * 4})
+            ed = wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K("qg"), column_config={
+                "Material": st.column_config.SelectboxColumn("Material", options=list(labels), required=False),
+                "Qty": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.01),
+                "Note": st.column_config.TextColumn("What it is for (optional)")})
+            ok, bad = parse_req(ed, labels)
+            if ok:
+                st.write(f"**{len(ok)} line(s) ready to send.**")
+            for msg in bad:
+                st.warning(msg)
+            if st.button("Send request to the CEO", type="primary"):
+                if bad:
+                    st.error("Please correct the lines marked above.")
+                elif not ok:
+                    st.info("Add at least one material.")
+                else:
+                    b = create_mat_request(sid, labels, ok, needed, user)
+                    done(f"Request #{b} sent with {len(ok)} line(s).")
+    reqs = load_mat_requests(ids)
+    if role in (STORE, FIELD):
+        mine = reqs[(reqs.Status == "Pending") & (reqs["Requested by"] == user)]
+        if len(mine):
+            st.subheader("My pending requests")
+            st.caption("You can still change these. Edit a quantity or tick Remove, then press Save changes.")
+            tbl = pd.DataFrame({"Request #": mine.batch.astype(int).values, "Field": mine.Field.values,
+                                "Material": mine.Material.values, "Unit": mine.Unit.values,
+                                "Quantity": mine.Requested.values, "Remove": False})
+            ed2 = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mp')}_{len(mine)}_{int(mine.id.iloc[0])}",
+                       disabled=["Request #", "Field", "Material", "Unit"],
+                       column_config={"Quantity": st.column_config.NumberColumn(min_value=0.01, step=0.01),
+                                      "Remove": st.column_config.CheckboxColumn()})
+            if st.button("Save changes", key="mp_save"):
+                removes = [int(i) for i, rm in zip(mine.id, ed2["Remove"]) if rm]
+                changes = {int(i): float(q) for i, q, rm, old in zip(mine.id, ed2["Quantity"], ed2["Remove"], mine.Requested)
+                           if not rm and pd.notna(q) and abs(float(q) - float(old)) > 1e-9}
+                if not removes and not changes:
+                    st.info("Nothing to change.")
+                else:
+                    skipped = update_mat_pending(user, changes, removes)
+                    done("Changes saved." + (f" {skipped} line(s) could not be changed because the CEO already decided them."
+                                             if skipped else ""))
+    if role == STORE:
+        appr = reqs[reqs.Status == "Approved"]
+        if len(appr):
+            st.subheader("Approved: record the delivery")
+            st.caption("When the materials arrive, check the quantity received and press Record delivery. "
+                       "The quantity is added to your stock.")
+            tbl = pd.DataFrame({"Request #": appr.batch.astype(int).values, "Field": appr.Field.values,
+                                "Material": appr.Material.values, "Unit": appr.Unit.values,
+                                "Approved": appr.Approved.values, "Received": appr.Approved.values})
+            ed3 = wide(st.data_editor, tbl, hide_index=True, key=f"{K('dl')}_{len(appr)}_{int(appr.id.iloc[0])}",
+                       disabled=["Request #", "Field", "Material", "Unit", "Approved"],
+                       column_config={"Received": st.column_config.NumberColumn("Received", min_value=0.0, step=0.01)})
+            if st.button("Record delivery", type="primary", key="dl_go"):
+                deliv = {int(i): float(q) for i, q in zip(appr.id, ed3["Received"]) if pd.notna(q) and float(q) > 0}
+                if not deliv:
+                    st.info("Enter the quantity received for at least one line.")
+                else:
+                    n = deliver_mat_lines(deliv, user, uid)
+                    done(f"{n} delivery line(s) recorded. The stock was updated.")
+    st.subheader("Requests" if role != ACCOUNTANT else "Material requests of your fields")
+    if reqs.empty:
+        st.caption("No requests yet.")
+    else:
+        request_list(reqs, "rq")
+
+
+def page_approve_mat():
+    """CEO: decide the material requests of all fields."""
+    user = st.session_state.user
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    ids = [int(i) for i in sites.id]
+    reqs = load_mat_requests(ids)
+    pending = reqs[reqs.Status == "Pending"]
+    if pending.empty:
+        st.success("No pending requests.")
+    else:
+        f1, f2 = st.columns(2)
+        field = f1.selectbox("Field", ["All fields"] + sites.name.tolist(), key="ap_field") if len(sites) > 1 else "All fields"
+        with f2:
+            q = search_box("ap_q", "Search material or person", "Type part of a name…")
+        shown = match(pending if field == "All fields" else pending[pending.Field == field], ["Material", "Requested by"], q)
+        if shown.empty:
+            st.info("No pending request matches your search.")
+        else:
+            bal = stock_balances(load_moves(sorted({int(i) for i in shown.site_id})))
+            have = {(int(a), int(b)): float(c) for a, b, c in zip(bal.site_id, bal.material_id, bal.Balance)}
+            st.write("Every row is one material. Choose **Approve**, **Reject** or **Decide later**, change the quantity to "
+                     "approve if needed, then press **Confirm decisions**.")
+            tbl = pd.DataFrame({
+                "Request #": shown.batch.astype(int).values, "Field": shown.Field.values, "By": shown["Requested by"].values,
+                "Material": shown.Material.values, "Unit": shown.Unit.values, "Requested": shown.Requested.values,
+                "In stock now": [have.get((int(a), int(b)), 0.0) for a, b in zip(shown.site_id, shown.material_id)],
+                "Needed by": shown["Needed by"].values, "Decision": "Approve", "Quantity to approve": shown.Requested.values,
+                "Reason if rejected": ""})
+            ed = wide(st.data_editor, tbl, hide_index=True, key=f"mdec{K('m')}_{abs(hash(tuple(int(i) for i in shown.id)))}",
+                      disabled=["Request #", "Field", "By", "Material", "Unit", "Requested", "In stock now", "Needed by"],
+                      column_config={"Decision": st.column_config.SelectboxColumn(options=["Approve", "Reject", "Decide later"], required=True),
+                                     "Quantity to approve": st.column_config.NumberColumn(min_value=0.0, step=0.01)})
+            if st.button(":material/check: Confirm decisions", type="primary", key="mdec_go"):
+                decisions, problems = {}, []
+                for rid, mat, dec, qty, why in zip(shown.id, ed["Material"], ed["Decision"], ed["Quantity to approve"], ed["Reason if rejected"]):
+                    qty = 0.0 if pd.isna(qty) else float(qty)
+                    if dec == "Approve":
+                        if qty <= 0:
+                            problems.append(mat)
+                        else:
+                            decisions[int(rid)] = (qty, "")
+                    elif dec == "Reject":
+                        decisions[int(rid)] = (0.0, why.strip() if isinstance(why, str) and why.strip() else "Not approved")
+                if problems:
+                    st.error("Enter a quantity above 0, or choose Reject, for: " + ", ".join(problems))
+                elif not decisions:
+                    st.warning("Nothing to confirm: every row is set to Decide later.")
+                else:
+                    err = decide_mat_requests(decisions, user)
+                    if err:
+                        st.error(err)
+                    else:
+                        ok_n = sum(q > 0 for q, _ in decisions.values())
+                        done(f"{ok_n} approved, {len(decisions) - ok_n} rejected, {len(pending) - len(decisions)} left for later.")
+    st.subheader("All requests")
+    if reqs.empty:
+        st.caption("No requests yet.")
+    else:
+        request_list(reqs, "ar")
+
+
+def page_matreq():
+    if st.session_state.role == CEO:
+        page_approve_mat()
+    else:
+        page_mat_requests()
 
 
 # ---------- fields and categories ----------
@@ -1585,6 +1867,7 @@ def page_users():
     wide(st.dataframe, match(show.drop(columns="id").rename(columns={"username": "User name", "role": "Role", "email": "Email"}),
                              ["User name", "Role", "Email", "Fields"], q), hide_index=True)
     with st.expander("Add a user"):
+        st.caption("The CEO sees all fields. Every other role works only on the field(s) you choose here.")
         a1, a2 = st.columns(2)
         nu = a1.text_input("User name", key=K("nu"))
         nr = a2.selectbox("Role", ROLES, index=3, key=K("nr"))
@@ -1592,7 +1875,10 @@ def page_users():
         npw = a2.text_input("Temporary password (at least 8 characters)", type="password", key=K("np"))
         ns = st.multiselect("Fields this user works on", list(site_ids), key=K("ns")) if nr != CEO else []
         if st.button("Add user"):
-            err = add_user(nu, nr, ne, npw)
+            err = None
+            if nr != CEO and not ns:
+                err = "Choose at least one field for this user." if site_ids else "Create a field first (Fields & categories)."
+            err = err or add_user(nu, nr, ne, npw)
             if err:
                 st.error(err)
             else:
@@ -1607,8 +1893,11 @@ def page_users():
             if role != CEO:
                 cur = st.multiselect("Fields this user works on", list(site_ids), default=mine.get(uid, []), key=K(f"wf{uid}"))
                 if st.button("Save fields"):
-                    set_user_sites(uid, [site_ids[n] for n in cur])
-                    done(f"Fields saved for {uname}.")
+                    if not cur:
+                        st.error("A user needs at least one field.")
+                    else:
+                        set_user_sites(uid, [site_ids[n] for n in cur])
+                        done(f"Fields saved for {uname}.")
             pw = st.text_input("New password (at least 8 characters)", type="password", key=K("wp"))
             sure = st.checkbox("I am sure I want to delete this user", key=K("ws"))
             w1, w2 = st.columns(2)
@@ -1630,20 +1919,23 @@ def page_users():
 # ---------- main ----------
 PAGES = {
     CEO: [("dashboard", "Dashboard", "dashboard"), ("stock", "Material stock", "inventory_2"),
-          ("expenses", "Expenses", "receipt_long"), ("funds", "Funds received", "payments"),
+          ("matreq", "Material requests", "shopping_cart"), ("expenses", "Expenses", "receipt_long"),
+          ("funds", "Funds received", "payments"),
           ("import", "Import from Excel", "upload_file"), ("setup", "Fields & categories", "construction"),
           ("reports", "Reports", "assessment"), ("users", "Users", "group")],
     ACCOUNTANT: [("dashboard", "Dashboard", "dashboard"), ("expenses", "Expenses", "receipt_long"),
                  ("import", "Import from Excel", "upload_file"), ("stock", "Material stock", "inventory_2"),
-                 ("setup", "Categories", "construction"), ("reports", "Reports", "assessment")],
+                 ("matreq", "Material requests", "shopping_cart"), ("setup", "Categories", "construction"), ("reports", "Reports", "assessment")],
     FIELD: [("dashboard", "Dashboard", "dashboard"), ("expenses", "Expenses", "receipt_long"),
-            ("stock", "Material stock", "inventory_2"), ("reports", "Reports", "assessment")],
-    STORE: [("stock", "Dashboard", "dashboard"), ("receive", "Materials received", "move_to_inbox"),
+            ("stock", "Material stock", "inventory_2"), ("matreq", "Request materials", "shopping_cart"),
+            ("reports", "Reports", "assessment")],
+    STORE: [("stock", "Dashboard", "dashboard"), ("matreq", "Request materials", "shopping_cart"),
+            ("receive", "Materials received", "move_to_inbox"),
             ("use", "Materials used", "outbox"), ("count", "Stock count", "fact_check")],
 }
 RENDER = {"dashboard": page_dashboard, "expenses": page_expenses, "funds": page_funds, "import": page_import,
           "setup": page_setup, "reports": page_reports, "users": page_users, "stock": page_stock,
-          "receive": page_receive, "use": page_use, "count": page_count}
+          "receive": page_receive, "use": page_use, "count": page_count, "matreq": page_matreq}
 
 
 def main():
@@ -1667,7 +1959,10 @@ def main():
         st.markdown("### Inchars PD Group")
         st.caption("Construction Management")
         st.divider()
-    sec, title = side_menu(PAGES[st.session_state.role])
+    counts = None
+    if st.session_state.role == CEO:  # number of material requests waiting for the CEO
+        counts = {"matreq": int(df("SELECT COUNT(DISTINCT batch) AS n FROM material_requests WHERE status='Pending'")["n"][0])}
+    sec, title = side_menu(PAGES[st.session_state.role], counts)
     header(title)
     show_flash()
     RENDER[sec]()
