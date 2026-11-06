@@ -2,6 +2,7 @@ import base64
 import calendar
 import difflib
 import hashlib
+import html
 import io
 import os
 import re
@@ -30,6 +31,7 @@ LOGO = os.path.join(BASE_DIR, "assets", "logo.png")
 
 CEO, ACCOUNTANT, STORE, FIELD = "CEO", "Accountant", "Store manager", "Field manager"
 ROLES = [CEO, ACCOUNTANT, STORE, FIELD]
+ALL = tuple(ROLES)
 SEE_ALL = (CEO,)  # only the CEO sees every field; everybody else works on the fields given to them
 FUNDS_VISIBLE = (CEO,)  # funds received from clients are shown to these roles only
 
@@ -45,6 +47,10 @@ SHEET_TO_CATEGORY = {  # sheet names used in the KDBS cost workbook -> category 
 ALIASES = {"item": ("nameofitems", "nameofitem", "namesoftransaction", "nameoftransaction", "item", "description"),
            "qty": ("units", "qty", "quantity"), "price": ("priceunitfrw", "punitfrw", "punit", "priceunit", "unitprice"),
            "total": ("total",), "date": ("date",)}
+
+MONEY_CATEGORIES = ["Fuel", "Food", "Transport", "Materials", "Tools & equipment", "Wages", "Airtime & communication",
+                    "Accommodation", "Tax", "Debt payment", "Other"]
+TAX_TYPES = ["VAT", "PAYE", "Corporate income tax", "Pension / RSSB", "Withholding tax", "Local taxes and fees", "Other"]
 
 try:
     st.set_page_config(page_title="Inchars PD Group - Construction Management", page_icon=":material/construction:",
@@ -477,7 +483,8 @@ def login():
                 user = authenticate(u, p)
                 if user:
                     clear_fails(u)
-                    st.session_state.update(user=user["username"], role=user["role"], uid=user["id"])
+                    roles = load_roles(user["id"]) or [user["role"]]
+                    st.session_state.update(user=user["username"], role=", ".join(roles), roles=roles, uid=user["id"])
                     st.rerun()
                 else:
                     note_fail(u)
@@ -603,6 +610,17 @@ SIDEBAR_CSS = """
 [data-testid="stSidebar"][aria-expanded="false"] .st-key-userbox {display:none;}
 [data-testid="stSidebar"] .stButton button[kind="primary"] *,
 [data-testid="stSidebar"] .stButton button[data-testid="stBaseButton-primary"] * {color:#ffffff !important;}
+[data-testid="stMetricValue"] {font-size:1.45rem !important;}
+[data-testid="stMetricValue"] > div {white-space:normal !important; overflow:visible !important; text-overflow:clip !important; line-height:1.2;}
+[data-testid="stMetricLabel"] p {font-size:.85rem !important;}
+.bars {margin:.3rem 0 1rem 0;}
+.bars .brow {display:flex; align-items:center; gap:.6rem; margin:.28rem 0;}
+.bars .blabel {width:30%; font-size:.85rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.bars .btrack {flex:1; background:#e4efe8; border-radius:6px; height:16px;}
+.bars .bfill {height:16px; border-radius:6px; background:#0b6a35;}
+.bars .bfill.b2 {background:#e0922f;}
+.bars .bval {width:22%; text-align:right; font-size:.85rem;}
+.bars .legend {font-size:.8rem; color:#4b6a57; margin-bottom:.3rem;}
 </style>
 """
 # ---------- database tables ----------
@@ -634,6 +652,22 @@ SCHEMA = [
         qty_approved DOUBLE PRECISION, qty_delivered DOUBLE PRECISION, status TEXT DEFAULT 'Pending', needed_by TEXT,
         requested_on TEXT, requested_by TEXT, decided_on TEXT, decided_by TEXT, note TEXT, reason TEXT, delivered_on TEXT)""",
     "CREATE INDEX IF NOT EXISTS idx_mr_site ON material_requests(site_id)",
+    "CREATE TABLE IF NOT EXISTS user_roles(user_id INTEGER, role TEXT, PRIMARY KEY(user_id, role))",
+    f"CREATE TABLE IF NOT EXISTS money_categories(id {PK}, name TEXT UNIQUE NOT NULL)",
+    f"""CREATE TABLE IF NOT EXISTS money_requests(
+        id {PK}, site_id INTEGER, category TEXT, purpose TEXT, amount BIGINT, amount_approved BIGINT, needed_by TEXT,
+        status TEXT DEFAULT 'Pending', requested_on TEXT, requested_by TEXT, decided_on TEXT, decided_by TEXT,
+        reason TEXT, paid_on TEXT, paid_by TEXT)""",
+    f"""CREATE TABLE IF NOT EXISTS money_ledger(
+        id {PK}, spent_on TEXT, person TEXT, site_id INTEGER, kind TEXT, category TEXT, amount BIGINT, note TEXT,
+        request_id INTEGER, entered_by TEXT, entered_at TEXT)""",
+    f"""CREATE TABLE IF NOT EXISTS taxes(
+        id {PK}, tax_type TEXT, period TEXT, amount BIGINT, paid_on TEXT, reference TEXT, site_id INTEGER, note TEXT,
+        entered_by TEXT)""",
+    f"""CREATE TABLE IF NOT EXISTS debts(
+        id {PK}, party TEXT, direction TEXT, amount BIGINT, due_on TEXT, site_id INTEGER, note TEXT, entered_by TEXT,
+        entered_on TEXT)""",
+    f"CREATE TABLE IF NOT EXISTS debt_payments(id {PK}, debt_id INTEGER, amount BIGINT, paid_on TEXT, note TEXT, entered_by TEXT)",
     "CREATE INDEX IF NOT EXISTS idx_mm_site ON material_moves(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_exp_site ON expenses(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_exp_date ON expenses(spent_on)",
@@ -651,6 +685,10 @@ def init_db():
                 c.execute(s)
         if c.execute("SELECT COUNT(*) AS n FROM categories").fetchone()["n"] == 0:
             bulk_insert(c, "categories", ["name"], [(n,) for n in DEFAULT_CATEGORIES])
+        if c.execute("SELECT COUNT(*) AS n FROM money_categories").fetchone()["n"] == 0:
+            bulk_insert(c, "money_categories", ["name"], [(n,) for n in MONEY_CATEGORIES])
+        # users made before several roles existed keep their one role
+        c.execute("INSERT INTO user_roles(user_id, role) SELECT id, role FROM users WHERE id NOT IN (SELECT user_id FROM user_roles)")
 
 
 def seed_first_manager():
@@ -661,8 +699,9 @@ def seed_first_manager():
         return
     with conn() as c:
         if c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 0:
-            c.execute("INSERT INTO users(username, password_hash, role, email) VALUES(?,?,?,?)",
-                      (u.strip(), hash_pw(p), CEO, (e or "").strip().lower() or None))
+            uid = c.execute("INSERT INTO users(username, password_hash, role, email) VALUES(?,?,?,?) RETURNING id",
+                            (u.strip(), hash_pw(p), CEO, (e or "").strip().lower() or None)).fetchone()["id"]
+            c.execute("INSERT INTO user_roles(user_id, role) VALUES(?,?)", (uid, CEO))
 
 
 def bulk_insert(c, table, cols, data, chunk=50):
@@ -687,6 +726,58 @@ LEFT_HTML = ('<div class="left-panel"><div class="overlay">' + (f'<img class="lo
              + '<h1>Inchars PD Group Ltd</h1><p>Construction Management System</p></div></div>')
 
 
+# ---------- several roles per user ----------
+def load_roles(uid):
+    return df("SELECT role FROM user_roles WHERE user_id=? ORDER BY role", (uid,))["role"].tolist()
+
+
+def roles_now():
+    return set(st.session_state.get("roles", []))
+
+
+def has(*rs):
+    """True when the signed-in user has at least one of these roles."""
+    return bool(roles_now() & set(rs))
+
+
+def set_user_roles(uid, roles):
+    with conn() as c:
+        c.execute("DELETE FROM user_roles WHERE user_id=?", (uid,))
+        bulk_insert(c, "user_roles", ["user_id", "role"], [(uid, r) for r in roles])
+        c.execute("UPDATE users SET role=? WHERE id=?", (roles[0], uid))
+
+
+def add_user_roles(username, roles, email, password):
+    err = add_user(username, roles[0], email, password)
+    if err:
+        return err
+    set_user_roles(int(df("SELECT id FROM users WHERE lower(username)=lower(?)", (username.strip(),))["id"][0]), roles)
+    return None
+
+
+def delete_user_full(uid, me):
+    if uid == me:
+        return "You cannot delete your own account."
+    with conn() as c:
+        ceos = [r["user_id"] for r in c.execute("SELECT user_id FROM user_roles WHERE role=?", (CEO,)).fetchall()]
+        if uid in ceos and len(ceos) <= 1:
+            return "You cannot delete the last CEO."
+        for t in ("user_roles", "user_sites", "reset_codes"):
+            c.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM users WHERE id=?", (uid,))
+    return None
+
+
+def ensure_named(c, table, name, extra=None):
+    """Id of the row called `name` in categories / money_categories / materials (case ignored). Creates it when new."""
+    row = c.execute(f"SELECT id FROM {table} WHERE lower(name)=lower(?)", (name.strip(),)).fetchone()
+    if row:
+        return row["id"]
+    if table == "materials":
+        return c.execute("INSERT INTO materials(name, unit) VALUES(?,?) RETURNING id", (name.strip(), (extra or "").strip())).fetchone()["id"]
+    return c.execute(f"INSERT INTO {table}(name) VALUES(?) RETURNING id", (name.strip(),)).fetchone()["id"]
+
+
 # ---------- helpers ----------
 def money(v):
     return f"{int(round(float(v))):,}"
@@ -705,7 +796,8 @@ def pretty(frame, money_cols=(), status_col=None, qty_cols=()):
     red, green = "background-color:#fde2e2;color:#7a1f1f", "background-color:#e3f5e8;color:#1b5e30"
     colors = {"Shortfall": red, "OK": green, "No funds": "background-color:#eceff1;color:#455a64",
               "Out of stock": red, "In stock": green, "Rejected": red, "Delivered": green,
-              "Pending": "background-color:#fff3d6;color:#7a4a00", "Approved": "background-color:#dbeeff;color:#0b3a66"}
+              "Pending": "background-color:#fff3d6;color:#7a4a00", "Approved": "background-color:#dbeeff;color:#0b3a66",
+              "Paid": green, "Settled": green, "Overdue": red, "Open": "background-color:#fff3d6;color:#7a4a00"}
     try:
         fmt = {c: "{:,.0f}" for c in money_cols if c in frame.columns}
         fmt.update({c: _q for c in qty_cols if c in frame.columns})
@@ -717,22 +809,41 @@ def pretty(frame, money_cols=(), status_col=None, qty_cols=()):
         return frame
 
 
-def hbar(frame, cat, val, title):
-    """Horizontal bar chart, biggest on top."""
-    try:
-        import altair as alt
-    except ImportError:
-        st.bar_chart(frame.set_index(cat)[val])
+def bars(frame, label, value, fmt=None, color=""):
+    """Horizontal bars drawn with plain HTML, biggest first. No chart add-on is needed, so it always loads."""
+    if frame is None or frame.empty:
         return
-    chart = alt.Chart(frame).mark_bar(color="#0b6a35").encode(
-        x=alt.X(f"{val}:Q", title=title), y=alt.Y(f"{cat}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=400)),
-        tooltip=[cat, val]).properties(height=34 * len(frame) + 50)
-    wide(st.altair_chart, chart)
+    fmt = fmt or money
+    top = max(float(frame[value].abs().max()), 1e-9)
+    rows = "".join(
+        f'<div class="brow"><div class="blabel" title="{html.escape(str(l))}">{html.escape(str(l))}</div>'
+        f'<div class="btrack"><div class="bfill {color}" style="width:{max(abs(float(v)) / top * 100, 0.8):.1f}%"></div></div>'
+        f'<div class="bval">{fmt(v)}</div></div>' for l, v in zip(frame[label], frame[value]))
+    st.markdown(f'<div class="bars">{rows}</div>', unsafe_allow_html=True)
+
+
+def hbar(frame, cat, val, title):
+    bars(frame, cat, val)
+
+
+def compare_bars(frame, label, a, b):
+    """Two bars per row (for example funds received and spent)."""
+    if frame.empty:
+        return
+    top = max(float(frame[[a, b]].abs().max().max()), 1e-9)
+    rows = ""
+    for l, x, y in zip(frame[label], frame[a], frame[b]):
+        rows += (f'<div class="brow"><div class="blabel">{html.escape(str(l))}</div><div style="flex:1">'
+                 f'<div class="btrack"><div class="bfill" style="width:{max(abs(float(x)) / top * 100, 0.8):.1f}%"></div></div>'
+                 f'<div class="btrack" style="margin-top:3px"><div class="bfill b2" style="width:{max(abs(float(y)) / top * 100, 0.8):.1f}%"></div></div>'
+                 f'</div><div class="bval">{money(x)}<br>{money(y)}</div></div>')
+    st.markdown(f'<div class="bars"><div class="legend">Green: {html.escape(a)} &nbsp; Orange: {html.escape(b)}</div>{rows}</div>',
+                unsafe_allow_html=True)
 
 
 def visible_sites():
     """CEO and Accountant see every field. Store and Field managers only the fields given to them."""
-    if st.session_state.role in SEE_ALL:
+    if has(*SEE_ALL):
         return df("SELECT * FROM sites ORDER BY name")
     return df("""SELECT s.* FROM sites s JOIN user_sites u ON u.site_id=s.id WHERE u.user_id=? ORDER BY s.name""",
               (st.session_state.uid,))
@@ -768,7 +879,7 @@ def load_funds(site_ids):
 def filter_bar(sites, exp, prefix):
     """Field, category and period filters (like the filters at the top of the Excel dashboard)."""
     f1, f2, f3, f4 = st.columns([2, 2, 1.5, 1.5])
-    if len(sites) > 1:
+    if len(sites) > 1 or has(CEO):
         field = f1.selectbox("Field", ["All fields"] + sites.name.tolist(), key=f"{prefix}_field")
     else:
         field = sites.name.iloc[0]
@@ -786,7 +897,7 @@ def filter_bar(sites, exp, prefix):
 
 
 def no_field_message():
-    if st.session_state.role in SEE_ALL:
+    if has(*SEE_ALL):
         st.info("There is no field yet. Create the first one in Fields & categories.")
     else:
         st.info("No field is linked to your account yet. Please ask the CEO to give you access to a field.")
@@ -794,7 +905,7 @@ def no_field_message():
 
 # ---------- dashboard ----------
 def page_dashboard():
-    can_funds = st.session_state.role in FUNDS_VISIBLE
+    can_funds = has(*FUNDS_VISIBLE)
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
@@ -826,8 +937,9 @@ def page_dashboard():
         balance = funds_all - spent_all
         items += [("Funds received", money(funds_all)), ("Balance / (shortfall)", ("-" if balance < 0 else "") + money(abs(balance))),
                   ("Funds used", f"{spent_all / funds_all * 100:.0f}%" if funds_all else "no funds yet")]
-    for col, (label, value) in zip(st.columns(len(items)), items):
-        col.metric(label, value)
+    for i in range(0, len(items), 3):  # three numbers per row so that every number can be read in full
+        for col, (label, value) in zip(st.columns(3), items[i:i + 3]):
+            col.metric(label, value)
 
     if field == "All fields" and len(sites) > 1:
         st.subheader("Fields")
@@ -849,7 +961,7 @@ def page_dashboard():
         wide(st.dataframe, pretty(match(per, ["Field", "Client"], q)[cols], money_cols, "Status"), hide_index=True)
         hbar(per.sort_values("Spent", ascending=False).head(10)[["Field", "Spent"]], "Field", "Spent", "Spent (Frw)")
 
-    if st.session_state.role == CEO:  # progress of the materials on every field
+    if has(CEO):  # progress of the materials on every field
         st.subheader("Materials on site")
         mv = load_moves(ids)
         if mv.empty:
@@ -876,7 +988,8 @@ def page_dashboard():
         wide(st.dataframe, pretty(rk, ["Amount"]), hide_index=True)
         hbar(rk.head(10)[["Category", "Amount"]], "Category", "Amount", "Amount (Frw)")
         st.subheader("Spending by month")
-        st.bar_chart(sel.assign(Month=sel.Date.str[:7]).groupby("Month").Total.sum())
+        bars(sel.assign(Month=sel.Date.str[:7]).groupby("Month", as_index=False).Total.sum().sort_values("Month", ascending=False).head(12),
+             "Month", "Total")
 
 
 # ---------- expenses ----------
@@ -885,15 +998,16 @@ def parse_entries(ed, cat_ids):
     for pos, (_, r) in enumerate(ed.iterrows(), start=1):
         item = str(r["Item"]).strip() if pd.notna(r["Item"]) else ""
         cat = r["Category"] if pd.notna(r["Category"]) else None
+        newcat = str(r["New category"]).strip() if pd.notna(r["New category"]) else ""
         qty, price = pd.to_numeric(r["Qty"], errors="coerce"), pd.to_numeric(r["Unit price"], errors="coerce")
-        if not item and not cat and (pd.isna(price) or price == 0):
+        if not item and not cat and not newcat and (pd.isna(price) or price == 0):
             continue  # empty row
         d = pd.to_datetime(r["Date"], errors="coerce")
         d = date.today() if pd.isna(d) else d.date()
         if not item:
             bad.append(f"Row {pos}: write the item name.")
-        elif cat not in cat_ids:
-            bad.append(f"Row {pos}: choose a category.")
+        elif not newcat and cat not in cat_ids:
+            bad.append(f"Row {pos}: choose a category, or type a new one.")
         elif pd.isna(qty) or qty <= 0:
             bad.append(f"Row {pos}: the quantity must be above 0.")
         elif pd.isna(price) or price <= 0:
@@ -901,26 +1015,28 @@ def parse_entries(ed, cat_ids):
         elif d > date.today():
             bad.append(f"Row {pos}: the date is in the future.")
         else:
-            ok.append({"date": d, "category": cat, "item": item, "qty": float(qty), "price": float(price),
-                       "total": int(round(float(qty) * float(price)))})
+            ok.append({"date": d, "category": cat, "new_category": newcat, "item": item, "qty": float(qty),
+                       "price": float(price), "total": int(round(float(qty) * float(price)))})
     return ok, bad
 
 
 def add_expenses(site_id, cat_ids, entries, user):
     now = datetime.now().isoformat(timespec="seconds")
     with conn() as c:
+        rows = []
+        for e in entries:
+            cid = ensure_named(c, "categories", e["new_category"]) if e["new_category"] else cat_ids[e["category"]]
+            rows.append((site_id, cid, e["item"], e["qty"], e["price"], e["total"], str(e["date"]), user, now, "entry"))
         bulk_insert(c, "expenses", ["site_id", "category_id", "item", "qty", "unit_price", "total", "spent_on",
-                                    "entered_by", "entered_at", "source"],
-                    [(site_id, cat_ids[e["category"]], e["item"], e["qty"], e["price"], e["total"], str(e["date"]),
-                      user, now, "entry") for e in entries])
+                                    "entered_by", "entered_at", "source"], rows)
 
 
-def delete_expenses(ids, role, user, uid):
-    """The Accountant can delete any entry of their fields. Others only their own entries of today."""
+def delete_expenses(ids, user, uid, is_accountant):
+    """An Accountant can delete any entry of their fields. Others only their own entries of today."""
     n = 0
     with conn() as c:
         for rid in ids:
-            if role == ACCOUNTANT:
+            if is_accountant:
                 n += c.execute("DELETE FROM expenses WHERE id=? AND site_id IN (SELECT site_id FROM user_sites WHERE user_id=?)",
                                (rid, uid)).rowcount
             else:
@@ -931,27 +1047,30 @@ def delete_expenses(ids, role, user, uid):
 
 
 def page_expenses():
-    role, user, uid = st.session_state.role, st.session_state.user, st.session_state.uid
+    user, uid = st.session_state.user, st.session_state.uid
+    can_add, is_acc = has(ACCOUNTANT, FIELD), has(ACCOUNTANT)
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
     site_ids = {r.name: int(r.id) for r in sites.itertuples()}
     cats = categories_df()
     cat_ids = dict(zip(cats.name, cats.id.astype(int)))
-    if role != CEO:
+    if can_add:
         st.subheader("Add expenses")
-        st.caption("Fill one line for each purchase or payment. Add more lines with the + at the bottom of the table.")
+        st.caption("One line for each purchase or payment. Choose the category from the list, or type a new category in "
+                   "the New category column. Add more lines with the + at the bottom of the table.")
         a1, _ = st.columns([2, 3])
         if len(site_ids) > 1:
             field = a1.selectbox("Field", list(site_ids), key=K("ef"))
         else:
             field = list(site_ids)[0]
             a1.markdown(f"**Field:** {field}")
-        grid = pd.DataFrame({"Date": [date.today()] * 5, "Category": [None] * 5, "Item": [""] * 5,
-                             "Qty": [1.0] * 5, "Unit price": [0.0] * 5})
+        grid = pd.DataFrame({"Date": [date.today()] * 5, "Category": [None] * 5, "New category": [""] * 5,
+                             "Item": [""] * 5, "Qty": [1.0] * 5, "Unit price": [0.0] * 5})
         ed = wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K("eg"), column_config={
             "Date": st.column_config.DateColumn("Date", max_value=date.today(), format="YYYY-MM-DD"),
             "Category": st.column_config.SelectboxColumn("Category", options=list(cat_ids), required=False),
+            "New category": st.column_config.TextColumn("New category"),
             "Item": st.column_config.TextColumn("Item"),
             "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.01),
             "Unit price": st.column_config.NumberColumn("Unit price (Frw)", min_value=0.0, step=0.01)})
@@ -984,27 +1103,26 @@ def page_expenses():
     st.caption(f"{len(view)} entries, total {money(view.Total.sum())} Frw" + (" (showing the latest 300)" if len(view) > 300 else ""))
     shown = view.head(300)
     cols = ["Date", "Field", "Category", "Item", "Qty", "Unit price", "Total", "Entered by"]
-    if role == CEO:
+    if not can_add:
         wide(st.dataframe, pretty(shown[cols], ["Unit price", "Total"]), hide_index=True)
         return
     tbl = shown[cols].copy()
     tbl["Remove"] = False
     ed2 = wide(st.data_editor, tbl, hide_index=True, key=f"{K('el')}_{len(shown)}", disabled=cols)
-    st.caption("Tick Remove, then press Delete. " + ("You can delete any entry of your fields." if role == ACCOUNTANT
+    st.caption("Tick Remove, then press Delete. " + ("You can delete any entry of your fields." if is_acc
                                                        else "You can delete your own entries from today."))
     if st.button("Delete ticked entries"):
         ids = [int(i) for i, r in zip(shown.id, ed2["Remove"]) if r]
         if not ids:
             st.info("Tick the entries you want to delete.")
         else:
-            n = delete_expenses(ids, role, user, uid)
-            done(f"{n} entr{'y' if n == 1 else 'ies'} deleted." +
-                 (f" {len(ids) - n} could not be deleted." if n < len(ids) else ""))
+            n = delete_expenses(ids, user, uid, is_acc)
+            done(f"{n} entr{'y' if n == 1 else 'ies'} deleted." + (f" {len(ids) - n} could not be deleted." if n < len(ids) else ""))
 
 
 # ---------- funds received (CEO only) ----------
 def page_funds():
-    if st.session_state.role not in FUNDS_VISIBLE:
+    if not has(*FUNDS_VISIBLE):
         return st.error("Funds received can only be seen by the CEO.")
     user = st.session_state.user
     sites = visible_sites()
@@ -1076,43 +1194,52 @@ def stock_balances(mv):
     return out.sort_values(["Field", "Material"]).reset_index(drop=True)
 
 
-def parse_moves(ed, mat_ids):
+def parse_moves(ed, mat_ids, allow_new=False):
     ok, bad = [], []
     for pos, (_, r) in enumerate(ed.iterrows(), start=1):
         mat = r["Material"] if pd.notna(r["Material"]) else None
+        new = str(r.get("New material", "") or "").strip() if pd.notna(r.get("New material", "")) else ""
+        unit = str(r.get("Unit", "") or "").strip() if pd.notna(r.get("Unit", "")) else ""
         qty = pd.to_numeric(r["Qty"], errors="coerce")
         detail = str(r["Detail"]).strip() if pd.notna(r["Detail"]) else ""
-        if not mat and (pd.isna(qty) or qty == 0) and not detail:
+        if not mat and not new and (pd.isna(qty) or qty == 0) and not detail:
             continue  # empty row
         d = pd.to_datetime(r["Date"], errors="coerce")
         d = date.today() if pd.isna(d) else d.date()
-        if mat not in mat_ids:
-            bad.append(f"Row {pos}: choose a material.")
+        if new and not allow_new:
+            bad.append(f"Row {pos}: choose the material from the list.")
+        elif new and not unit:
+            bad.append(f"Row {pos}: write the unit of the new material (bags, pcs, kg, m3…).")
+        elif not new and mat not in mat_ids:
+            bad.append(f"Row {pos}: choose a material, or type a new one.")
         elif pd.isna(qty) or qty <= 0:
             bad.append(f"Row {pos}: the quantity must be above 0.")
         elif d > date.today():
             bad.append(f"Row {pos}: the date is in the future.")
         else:
-            ok.append({"date": d, "material": mat, "qty": float(qty), "detail": detail})
+            ok.append({"date": d, "material": mat, "new": (new, unit) if new else None, "qty": float(qty), "detail": detail})
     return ok, bad
 
 
 def add_moves(site_id, mat_ids, kind, entries, user):
-    """Received adds to the stock and Used takes away. Returns an error text, or None when saved."""
+    """Received adds to the stock and Used takes away. New materials are created on the way.
+    Returns an error text, or None when saved."""
     sign, now = (1 if kind == "Received" else -1), datetime.now().isoformat(timespec="seconds")
     try:
         with conn() as c:
+            ids = [ensure_named(c, "materials", e["new"][0], e["new"][1]) if e["new"] else mat_ids[e["material"]] for e in entries]
             if kind == "Used":  # never use more than is in stock
                 need = {}
-                for e in entries:
-                    need[e["material"]] = need.get(e["material"], 0) + e["qty"]
-                for name, q in need.items():
+                for mid, e in zip(ids, entries):
+                    need[mid] = need.get(mid, 0) + e["qty"]
+                for mid, q in need.items():
                     have = float(c.execute("SELECT COALESCE(SUM(qty), 0) AS b FROM material_moves WHERE site_id=? AND material_id=?",
-                                           (site_id, mat_ids[name])).fetchone()["b"])
+                                           (site_id, mid)).fetchone()["b"])
                     if q > have + 1e-9:
-                        raise Abort(f"{name.split(' (')[0]}: only {have:g} in stock.")
+                        name = c.execute("SELECT name FROM materials WHERE id=?", (mid,)).fetchone()["name"]
+                        raise Abort(f"{name}: only {have:g} in stock.")
             bulk_insert(c, "material_moves", ["site_id", "material_id", "kind", "qty", "moved_on", "detail", "entered_by", "entered_at"],
-                        [(site_id, mat_ids[e["material"]], kind, sign * e["qty"], str(e["date"]), e["detail"], user, now) for e in entries])
+                        [(site_id, mid, kind, sign * e["qty"], str(e["date"]), e["detail"], user, now) for mid, e in zip(ids, entries)])
     except Abort as e:
         return str(e)
     return None
@@ -1141,10 +1268,14 @@ def pick_field(sites, key):
 
 
 def move_columns(kind, labels):
-    return {"Date": st.column_config.DateColumn("Date", max_value=date.today(), format="YYYY-MM-DD"),
-            "Material": st.column_config.SelectboxColumn("Material", options=labels, required=False),
-            "Qty": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.01),
-            "Detail": st.column_config.TextColumn("Supplier / delivery note" if kind == "Received" else "Used for (work or activity)")}
+    cfg = {"Date": st.column_config.DateColumn("Date", max_value=date.today(), format="YYYY-MM-DD"),
+           "Material": st.column_config.SelectboxColumn("Material", options=labels or ["(list is empty)"], required=False),
+           "Qty": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.01),
+           "Detail": st.column_config.TextColumn("Supplier / delivery note" if kind == "Received" else "Used for (work or activity)")}
+    if kind == "Received":
+        cfg["New material"] = st.column_config.TextColumn("New material (if not in the list)")
+        cfg["Unit"] = st.column_config.TextColumn("Unit (new material)")
+    return cfg
 
 
 def recent_moves(site_id, kind, key):
@@ -1156,26 +1287,8 @@ def recent_moves(site_id, kind, key):
                               qty_cols=["Qty"]), hide_index=True)
 
 
-def add_material_box():
-    """Store manager: add a material (name and unit) to the shared materials list."""
-    with st.expander("Add a new material to the list"):
-        n1, n2, n3 = st.columns([3, 2, 1])
-        nm = n1.text_input("Material name", key=K("mn"))
-        nu = n2.text_input("Unit", placeholder="bags, pcs, kg, m3, litres, tonnes…", key=K("mu"))
-        n3.write("")
-        if n3.button("Add"):
-            if not nm.strip() or not nu.strip():
-                st.warning("Write the material name and its unit.")
-            else:
-                try:
-                    run("INSERT INTO materials(name, unit) VALUES(?,?)", (nm.strip(), nu.strip()))
-                    done(f"{nm.strip()} added to the list.")
-                except IntegrityErrors:
-                    st.error("That material is already in the list.")
-
-
 def page_receive():
-    if st.session_state.role != STORE:
+    if not has(STORE):
         return st.error("This page is for the Store manager.")
     sites = visible_sites()
     if sites.empty:
@@ -1183,15 +1296,14 @@ def page_receive():
     field = pick_field(sites, K("rf"))
     sid = int(sites[sites.name == field].id.iloc[0])
     mats = load_materials()
-    add_material_box()
-    if mats.empty:
-        return st.info("The materials list is empty. Add your first material above.")
     labels = {f"{r.name} ({r.unit})": int(r.id) for r in mats.itertuples()}
     st.subheader("Materials received")
-    st.caption("One line for each delivery. Add more lines with the + at the bottom of the table.")
-    grid = pd.DataFrame({"Date": [date.today()] * 5, "Material": [None] * 5, "Qty": [0.0] * 5, "Detail": [""] * 5})
+    st.caption("One line for each delivery. Choose the material from the list. If it is not in the list yet, type its "
+               "name and unit in the last columns and it is added for everybody. Add more lines with the + at the bottom.")
+    grid = pd.DataFrame({"Date": [date.today()] * 5, "Material": [None] * 5, "Qty": [0.0] * 5, "New material": [""] * 5,
+                         "Unit": [""] * 5, "Detail": [""] * 5})
     ed = wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K("rg"), column_config=move_columns("Received", list(labels)))
-    ok, bad = parse_moves(ed, labels)
+    ok, bad = parse_moves(ed, labels, allow_new=True)
     if ok:
         st.write(f"**{len(ok)} line(s) ready to save.**")
     for msg in bad:
@@ -1208,7 +1320,7 @@ def page_receive():
 
 
 def page_use():
-    if st.session_state.role != STORE:
+    if not has(STORE):
         return st.error("This page is for the Store manager.")
     sites = visible_sites()
     if sites.empty:
@@ -1244,7 +1356,7 @@ def page_use():
 
 
 def page_count():
-    if st.session_state.role != STORE:
+    if not has(STORE):
         return st.error("This page is for the Store manager.")
     sites = visible_sites()
     if sites.empty:
@@ -1338,6 +1450,8 @@ def page_stock():
 
 
 # ---------- material requests ----------
+# Everybody can ask. The Accountant or the CEO approves (whoever acts first), nobody approves their own request
+# (the CEO may), and the Store manager records the delivery, which adds the quantity to the stock.
 REQ_COLS = ["id", "batch", "site_id", "material_id", "Date", "Field", "Material", "Unit", "Requested", "Approved",
             "Delivered", "Status", "Needed by", "Requested by", "Decided by", "Note", "Reason"]
 
@@ -1357,16 +1471,20 @@ def parse_req(ed, labels):
     ok, bad = [], []
     for pos, (_, r) in enumerate(ed.iterrows(), start=1):
         mat = r["Material"] if pd.notna(r["Material"]) else None
+        new = str(r["New material"]).strip() if pd.notna(r["New material"]) else ""
+        unit = str(r["Unit"]).strip() if pd.notna(r["Unit"]) else ""
         qty = pd.to_numeric(r["Qty"], errors="coerce")
         note = str(r["Note"]).strip() if pd.notna(r["Note"]) else ""
-        if not mat and (pd.isna(qty) or qty == 0) and not note:
+        if not mat and not new and (pd.isna(qty) or qty == 0) and not note:
             continue  # empty row
-        if mat not in labels:
-            bad.append(f"Row {pos}: choose a material.")
+        if new and not unit:
+            bad.append(f"Row {pos}: write the unit of the new material.")
+        elif not new and mat not in labels:
+            bad.append(f"Row {pos}: choose a material, or type a new one.")
         elif pd.isna(qty) or qty <= 0:
             bad.append(f"Row {pos}: the quantity must be above 0.")
         else:
-            ok.append({"material": mat, "qty": float(qty), "note": note})
+            ok.append({"material": mat, "new": (new, unit) if new else None, "qty": float(qty), "note": note})
     return ok, bad
 
 
@@ -1375,7 +1493,8 @@ def create_mat_request(site_id, labels, items, needed_by, user):
     first, today, b = True, str(date.today()), 0
     with conn() as c:
         for e in items:
-            vals = (site_id, labels[e["material"]], e["qty"], str(needed_by), today, user, e["note"])
+            mid = ensure_named(c, "materials", e["new"][0], e["new"][1]) if e["new"] else labels[e["material"]]
+            vals = (site_id, mid, e["qty"], str(needed_by), today, user, e["note"])
             if first:
                 b = c.execute("INSERT INTO material_requests(batch, site_id, material_id, qty_requested, needed_by, requested_on, "
                               "requested_by, note) VALUES(0,?,?,?,?,?,?,?) RETURNING id", vals).fetchone()["id"]
@@ -1400,12 +1519,16 @@ def update_mat_pending(user, changes, removes):
     return skipped
 
 
-def decide_mat_requests(decisions, user):
-    """CEO. decisions = {request id: (quantity to approve, reason)}. Quantity 0 refuses the line."""
+def decide_mat_requests(decisions, user, is_ceo):
+    """Accountant or CEO. decisions = {request id: (quantity to approve, reason)}. Quantity 0 refuses the line.
+    Nobody except the CEO can decide their own request."""
     today = str(date.today())
     try:
         with conn() as c:
             for rid, (q, why) in decisions.items():
+                row = c.execute("SELECT requested_by FROM material_requests WHERE id=?", (rid,)).fetchone()
+                if row is not None and row["requested_by"] == user and not is_ceo:
+                    raise Abort("You cannot decide your own request. The CEO does that.")
                 if q > 0:
                     n = c.execute("UPDATE material_requests SET status='Approved', qty_approved=?, decided_on=?, decided_by=? "
                                   "WHERE id=? AND status='Pending'", (q, today, user, rid)).rowcount
@@ -1413,7 +1536,7 @@ def decide_mat_requests(decisions, user):
                     n = c.execute("UPDATE material_requests SET status='Rejected', qty_approved=0, decided_on=?, decided_by=?, "
                                   "reason=? WHERE id=? AND status='Pending'", (today, user, why or "Not approved", rid)).rowcount
                 if n != 1:
-                    raise Abort("Some of these requests were already handled or cancelled. Please refresh the page.")
+                    raise Abort("Some of these requests were already decided by someone else. Please refresh the page.")
     except Abort as e:
         return str(e)
     return None
@@ -1437,6 +1560,18 @@ def deliver_mat_lines(deliveries, user, uid):
     return n
 
 
+def pending_material_requests():
+    """How many requests wait for the signed-in Accountant or CEO."""
+    sites = visible_sites()
+    if sites.empty:
+        return 0
+    r = load_mat_requests([int(i) for i in sites.id])
+    p = r[r.Status == "Pending"]
+    if not has(CEO):
+        p = p[p["Requested by"] != st.session_state.user]
+    return int(p.batch.nunique())
+
+
 def request_list(reqs, prefix):
     """Search and status filter for a table of requests."""
     c1, c2 = st.columns([2, 3])
@@ -1451,161 +1586,621 @@ def request_list(reqs, prefix):
                               qty_cols=["Requested", "Approved", "Delivered"]), hide_index=True)
 
 
-def page_mat_requests():
-    """Store manager and Field manager ask for materials. The Accountant can see what was approved."""
-    role, user, uid = st.session_state.role, st.session_state.user, st.session_state.uid
+def section_approve(reqs, sites, user, is_ceo):
+    st.subheader("Waiting for your approval")
+    pending = reqs[reqs.Status == "Pending"]
+    if not is_ceo:
+        st.caption("You and the CEO can both approve. Your own requests are decided by the CEO.")
+        pending = pending[pending["Requested by"] != user]
+    if pending.empty:
+        return st.success("No pending requests.")
+    f1, f2 = st.columns(2)
+    field = f1.selectbox("Field", ["All fields"] + sites.name.tolist(), key="ap_field") if len(sites) > 1 else "All fields"
+    with f2:
+        q = search_box("ap_q", "Search material or person", "Type part of a name…")
+    shown = match(pending if field == "All fields" else pending[pending.Field == field], ["Material", "Requested by"], q)
+    if shown.empty:
+        return st.info("No pending request matches your search.")
+    bal = stock_balances(load_moves(sorted({int(i) for i in shown.site_id})))
+    have = {(int(a), int(b)): float(c) for a, b, c in zip(bal.site_id, bal.material_id, bal.Balance)}
+    st.write("Every row is one material. Choose **Approve**, **Reject** or **Decide later**, change the quantity if needed, "
+             "then press **Confirm decisions**.")
+    tbl = pd.DataFrame({
+        "Request #": shown.batch.astype(int).values, "Field": shown.Field.values, "By": shown["Requested by"].values,
+        "Material": shown.Material.values, "Unit": shown.Unit.values, "Requested": shown.Requested.values,
+        "In stock now": [have.get((int(a), int(b)), 0.0) for a, b in zip(shown.site_id, shown.material_id)],
+        "Needed by": shown["Needed by"].values, "Decision": "Approve", "Quantity to approve": shown.Requested.values,
+        "Reason if rejected": ""})
+    ed = wide(st.data_editor, tbl, hide_index=True, key=f"mdec{K('m')}_{abs(hash(tuple(int(i) for i in shown.id)))}",
+              disabled=["Request #", "Field", "By", "Material", "Unit", "Requested", "In stock now", "Needed by"],
+              column_config={"Decision": st.column_config.SelectboxColumn(options=["Approve", "Reject", "Decide later"], required=True),
+                             "Quantity to approve": st.column_config.NumberColumn(min_value=0.0, step=0.01)})
+    if st.button(":material/check: Confirm decisions", type="primary", key="mdec_go"):
+        decisions, problems = {}, []
+        for rid, mat, dec, qty, why in zip(shown.id, ed["Material"], ed["Decision"], ed["Quantity to approve"], ed["Reason if rejected"]):
+            qty = 0.0 if pd.isna(qty) else float(qty)
+            if dec == "Approve":
+                if qty <= 0:
+                    problems.append(mat)
+                else:
+                    decisions[int(rid)] = (qty, "")
+            elif dec == "Reject":
+                decisions[int(rid)] = (0.0, why.strip() if isinstance(why, str) and why.strip() else "Not approved")
+        if problems:
+            st.error("Enter a quantity above 0, or choose Reject, for: " + ", ".join(problems))
+        elif not decisions:
+            st.warning("Nothing to confirm: every row is set to Decide later.")
+        else:
+            err = decide_mat_requests(decisions, user, is_ceo)
+            if err:
+                st.error(err)
+            else:
+                ok_n = sum(q > 0 for q, _ in decisions.values())
+                done(f"{ok_n} approved, {len(decisions) - ok_n} rejected, {len(pending) - len(decisions)} left for later.")
+
+
+def section_new(sites, user):
+    field = pick_field(sites, K("qf"))
+    sid = int(sites[sites.name == field].id.iloc[0])
+    labels = {f"{r.name} ({r.unit})": int(r.id) for r in load_materials().itertuples()}
+    st.subheader("New request")
+    st.caption("The request goes to the Accountant and to the CEO. Whoever is available approves it. Choose the material "
+               "from the list, or type a new material and its unit in the last two columns.")
+    needed = st.date_input("Needed by", date.today() + timedelta(days=7), min_value=date.today(), key=K("qd"))
+    grid = pd.DataFrame({"Material": [None] * 4, "Qty": [0.0] * 4, "New material": [""] * 4, "Unit": [""] * 4, "Note": [""] * 4})
+    ed = wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K("qg"), column_config={
+        "Material": st.column_config.SelectboxColumn("Material", options=list(labels) or ["(list is empty)"], required=False),
+        "Qty": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.01),
+        "New material": st.column_config.TextColumn("New material (if not in the list)"),
+        "Unit": st.column_config.TextColumn("Unit (new material)"),
+        "Note": st.column_config.TextColumn("What it is for (optional)")})
+    ok, bad = parse_req(ed, labels)
+    if ok:
+        st.write(f"**{len(ok)} line(s) ready to send.**")
+    for msg in bad:
+        st.warning(msg)
+    if st.button("Send request", type="primary"):
+        if bad:
+            st.error("Please correct the lines marked above.")
+        elif not ok:
+            st.info("Add at least one material.")
+        else:
+            b = create_mat_request(sid, labels, ok, needed, user)
+            done(f"Request #{b} sent with {len(ok)} line(s).")
+
+
+def section_mine(reqs, user):
+    mine = reqs[(reqs.Status == "Pending") & (reqs["Requested by"] == user)]
+    if mine.empty:
+        return
+    st.subheader("My pending requests")
+    st.caption("You can still change these. Edit a quantity or tick Remove, then press Save changes.")
+    tbl = pd.DataFrame({"Request #": mine.batch.astype(int).values, "Field": mine.Field.values, "Material": mine.Material.values,
+                        "Unit": mine.Unit.values, "Quantity": mine.Requested.values, "Remove": False})
+    ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mp')}_{len(mine)}_{int(mine.id.iloc[0])}",
+              disabled=["Request #", "Field", "Material", "Unit"],
+              column_config={"Quantity": st.column_config.NumberColumn(min_value=0.01, step=0.01),
+                             "Remove": st.column_config.CheckboxColumn()})
+    if st.button("Save changes", key="mp_save"):
+        removes = [int(i) for i, rm in zip(mine.id, ed["Remove"]) if rm]
+        changes = {int(i): float(q) for i, q, rm, old in zip(mine.id, ed["Quantity"], ed["Remove"], mine.Requested)
+                   if not rm and pd.notna(q) and abs(float(q) - float(old)) > 1e-9}
+        if not removes and not changes:
+            st.info("Nothing to change.")
+        else:
+            skipped = update_mat_pending(user, changes, removes)
+            done("Changes saved." + (f" {skipped} line(s) could not be changed because they were already decided." if skipped else ""))
+
+
+def section_delivery(reqs, user, uid):
+    appr = reqs[reqs.Status == "Approved"]
+    if appr.empty:
+        return
+    st.subheader("Approved: record the delivery")
+    st.caption("When the materials arrive, check the quantity received and press Record delivery. The quantity is added to your stock.")
+    tbl = pd.DataFrame({"Request #": appr.batch.astype(int).values, "Field": appr.Field.values, "Material": appr.Material.values,
+                        "Unit": appr.Unit.values, "Approved": appr.Approved.values, "Received": appr.Approved.values})
+    ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('dl')}_{len(appr)}_{int(appr.id.iloc[0])}",
+              disabled=["Request #", "Field", "Material", "Unit", "Approved"],
+              column_config={"Received": st.column_config.NumberColumn("Received", min_value=0.0, step=0.01)})
+    if st.button("Record delivery", type="primary", key="dl_go"):
+        deliv = {int(i): float(q) for i, q in zip(appr.id, ed["Received"]) if pd.notna(q) and float(q) > 0}
+        if not deliv:
+            st.info("Enter the quantity received for at least one line.")
+        else:
+            done(f"{deliver_mat_lines(deliv, user, uid)} delivery line(s) recorded. The stock was updated.")
+
+
+def page_matreq():
+    user, uid = st.session_state.user, st.session_state.uid
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
-    ids = [int(i) for i in sites.id]
-    if role in (STORE, FIELD):
-        field = pick_field(sites, K("qf"))
-        sid = int(sites[sites.name == field].id.iloc[0])
-        if role == STORE:
-            add_material_box()
-        mats = load_materials()
-        if mats.empty:
-            st.info("The materials list is empty." + (" Add the first material above." if role == STORE
-                                                         else " Ask the Store manager to add the materials."))
-        else:
-            labels = {f"{r.name} ({r.unit})": int(r.id) for r in mats.itertuples()}
-            st.subheader("New request")
-            needed = st.date_input("Needed by", date.today() + timedelta(days=7), min_value=date.today(), key=K("qd"))
-            grid = pd.DataFrame({"Material": [None] * 4, "Qty": [0.0] * 4, "Note": [""] * 4})
-            ed = wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K("qg"), column_config={
-                "Material": st.column_config.SelectboxColumn("Material", options=list(labels), required=False),
-                "Qty": st.column_config.NumberColumn("Quantity", min_value=0.0, step=0.01),
-                "Note": st.column_config.TextColumn("What it is for (optional)")})
-            ok, bad = parse_req(ed, labels)
-            if ok:
-                st.write(f"**{len(ok)} line(s) ready to send.**")
-            for msg in bad:
-                st.warning(msg)
-            if st.button("Send request to the CEO", type="primary"):
-                if bad:
-                    st.error("Please correct the lines marked above.")
-                elif not ok:
-                    st.info("Add at least one material.")
-                else:
-                    b = create_mat_request(sid, labels, ok, needed, user)
-                    done(f"Request #{b} sent with {len(ok)} line(s).")
-    reqs = load_mat_requests(ids)
-    if role in (STORE, FIELD):
-        mine = reqs[(reqs.Status == "Pending") & (reqs["Requested by"] == user)]
-        if len(mine):
-            st.subheader("My pending requests")
-            st.caption("You can still change these. Edit a quantity or tick Remove, then press Save changes.")
-            tbl = pd.DataFrame({"Request #": mine.batch.astype(int).values, "Field": mine.Field.values,
-                                "Material": mine.Material.values, "Unit": mine.Unit.values,
-                                "Quantity": mine.Requested.values, "Remove": False})
-            ed2 = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mp')}_{len(mine)}_{int(mine.id.iloc[0])}",
-                       disabled=["Request #", "Field", "Material", "Unit"],
-                       column_config={"Quantity": st.column_config.NumberColumn(min_value=0.01, step=0.01),
-                                      "Remove": st.column_config.CheckboxColumn()})
-            if st.button("Save changes", key="mp_save"):
-                removes = [int(i) for i, rm in zip(mine.id, ed2["Remove"]) if rm]
-                changes = {int(i): float(q) for i, q, rm, old in zip(mine.id, ed2["Quantity"], ed2["Remove"], mine.Requested)
-                           if not rm and pd.notna(q) and abs(float(q) - float(old)) > 1e-9}
-                if not removes and not changes:
-                    st.info("Nothing to change.")
-                else:
-                    skipped = update_mat_pending(user, changes, removes)
-                    done("Changes saved." + (f" {skipped} line(s) could not be changed because the CEO already decided them."
-                                             if skipped else ""))
-    if role == STORE:
-        appr = reqs[reqs.Status == "Approved"]
-        if len(appr):
-            st.subheader("Approved: record the delivery")
-            st.caption("When the materials arrive, check the quantity received and press Record delivery. "
-                       "The quantity is added to your stock.")
-            tbl = pd.DataFrame({"Request #": appr.batch.astype(int).values, "Field": appr.Field.values,
-                                "Material": appr.Material.values, "Unit": appr.Unit.values,
-                                "Approved": appr.Approved.values, "Received": appr.Approved.values})
-            ed3 = wide(st.data_editor, tbl, hide_index=True, key=f"{K('dl')}_{len(appr)}_{int(appr.id.iloc[0])}",
-                       disabled=["Request #", "Field", "Material", "Unit", "Approved"],
-                       column_config={"Received": st.column_config.NumberColumn("Received", min_value=0.0, step=0.01)})
-            if st.button("Record delivery", type="primary", key="dl_go"):
-                deliv = {int(i): float(q) for i, q in zip(appr.id, ed3["Received"]) if pd.notna(q) and float(q) > 0}
-                if not deliv:
-                    st.info("Enter the quantity received for at least one line.")
-                else:
-                    n = deliver_mat_lines(deliv, user, uid)
-                    done(f"{n} delivery line(s) recorded. The stock was updated.")
-    st.subheader("Requests" if role != ACCOUNTANT else "Material requests of your fields")
+    reqs = load_mat_requests([int(i) for i in sites.id])
+    if has(CEO, ACCOUNTANT):
+        section_approve(reqs, sites, user, has(CEO))
+    section_new(sites, user)
+    section_mine(reqs, user)
+    if has(STORE):
+        section_delivery(reqs, user, uid)
+    st.subheader("All requests")
     if reqs.empty:
         st.caption("No requests yet.")
     else:
         request_list(reqs, "rq")
 
 
-def page_approve_mat():
-    """CEO: decide the material requests of all fields."""
+# ---------- money: requests to the CEO, money used, taxes and debts ----------
+def money_cats():
+    return df("SELECT name FROM money_categories ORDER BY name")["name"].tolist()
+
+
+def field_choices(sites):
+    return {"(no field)": None, **{r.name: int(r.id) for r in sites.itertuples()}}
+
+
+def load_money_requests():
+    """Everybody sees their own requests. The Accountant also sees those of their fields and company-level ones."""
+    user, uid = st.session_state.user, st.session_state.uid
+    where, params = "r.requested_by=?", [user]
+    if has(CEO):
+        where, params = "1=1", []
+    elif has(ACCOUNTANT):
+        where, params = "(r.requested_by=? OR r.site_id IS NULL OR r.site_id IN (SELECT site_id FROM user_sites WHERE user_id=?))", [user, uid]
+    return df(f"""SELECT r.id, r.site_id, r.requested_on AS "Date", COALESCE(s.name, '(no field)') AS "Field",
+                  r.category AS "Category", r.purpose AS "Purpose", r.amount AS "Requested", r.amount_approved AS "Approved",
+                  r.status AS "Status", r.needed_by AS "Needed by", r.requested_by AS "Requested by",
+                  r.decided_by AS "Decided by", r.reason AS "Reason", r.paid_on AS "Paid on"
+                  FROM money_requests r LEFT JOIN sites s ON s.id=r.site_id WHERE {where} ORDER BY r.id DESC""", tuple(params))
+
+
+def create_money_request(site_id, category, new_category, purpose, amount, needed_by, user):
+    with conn() as c:
+        cat = new_category.strip() if new_category.strip() else category
+        if new_category.strip():
+            ensure_named(c, "money_categories", cat)
+        c.execute("INSERT INTO money_requests(site_id, category, purpose, amount, needed_by, requested_on, requested_by) "
+                  "VALUES(?,?,?,?,?,?,?)", (site_id, cat, purpose.strip(), int(amount), str(needed_by), str(date.today()), user))
+
+
+def update_money_pending(user, changes, removes):
+    skipped = 0
+    with conn() as c:
+        for rid in removes:
+            skipped += c.execute("DELETE FROM money_requests WHERE id=? AND status='Pending' AND requested_by=?", (rid, user)).rowcount == 0
+        for rid, a in changes.items():
+            skipped += c.execute("UPDATE money_requests SET amount=? WHERE id=? AND status='Pending' AND requested_by=?",
+                                 (int(a), rid, user)).rowcount == 0
+    return skipped
+
+
+def decide_money_requests(decisions, user):
+    """CEO. decisions = {request id: (amount to approve, reason)}. Amount 0 refuses the request."""
+    today = str(date.today())
+    try:
+        with conn() as c:
+            for rid, (a, why) in decisions.items():
+                if a > 0:
+                    n = c.execute("UPDATE money_requests SET status='Approved', amount_approved=?, decided_on=?, decided_by=? "
+                                  "WHERE id=? AND status='Pending'", (int(a), today, user, rid)).rowcount
+                else:
+                    n = c.execute("UPDATE money_requests SET status='Rejected', amount_approved=0, decided_on=?, decided_by=?, reason=? "
+                                  "WHERE id=? AND status='Pending'", (today, user, why or "Not approved", rid)).rowcount
+                if n != 1:
+                    raise Abort("Some requests were already decided. Please refresh the page.")
+    except Abort as e:
+        return str(e)
+    return None
+
+
+def pay_money_requests(ids, user):
+    """CEO or Accountant records the payment. The money is added to the requester's 'money used'."""
+    now, n = datetime.now().isoformat(timespec="seconds"), 0
+    with conn() as c:
+        for rid in ids:
+            r = c.execute("SELECT * FROM money_requests WHERE id=? AND status='Approved'", (rid,)).fetchone()
+            if r is None or r["requested_by"] == user:
+                continue  # nobody records the payment of their own request
+            c.execute("UPDATE money_requests SET status='Paid', paid_on=?, paid_by=? WHERE id=?", (str(date.today()), user, rid))
+            c.execute("INSERT INTO money_ledger(spent_on, person, site_id, kind, category, amount, note, request_id, entered_by, entered_at) "
+                      "VALUES(?,?,?,?,?,?,?,?,?,?)", (str(date.today()), r["requested_by"], r["site_id"], "Business", r["category"],
+                                                      r["amount_approved"], r["purpose"], rid, user, now))
+            n += 1
+    return n
+
+
+def pending_money_requests():
+    r = load_money_requests()
+    return int((r.Status == "Pending").sum()) if has(CEO) else int((r.Status == "Approved").sum()) if has(ACCOUNTANT) else 0
+
+
+def money_list(reqs, prefix):
+    c1, c2 = st.columns([2, 3])
+    status = c1.radio("Show", ["All", "Pending", "Approved", "Paid", "Rejected"], horizontal=True, key=f"{prefix}_st")
+    with c2:
+        q = search_box(f"{prefix}_q", "Search purpose, category or person", "Type part of a word…")
+    view = reqs if status == "All" else reqs[reqs.Status == status]
+    view = match(view, ["Purpose", "Category", "Requested by", "Field"], q)
+    cols = ["id", "Date", "Field", "Category", "Purpose", "Requested", "Approved", "Status", "Needed by", "Requested by",
+            "Decided by", "Reason", "Paid on"]
+    wide(st.dataframe, pretty(view[cols].rename(columns={"id": "Request #"}), ["Requested", "Approved"], "Status"), hide_index=True)
+
+
+def page_moneyreq():
     user = st.session_state.user
     sites = visible_sites()
-    if sites.empty:
-        return no_field_message()
-    ids = [int(i) for i in sites.id]
-    reqs = load_mat_requests(ids)
-    pending = reqs[reqs.Status == "Pending"]
-    if pending.empty:
-        st.success("No pending requests.")
-    else:
-        f1, f2 = st.columns(2)
-        field = f1.selectbox("Field", ["All fields"] + sites.name.tolist(), key="ap_field") if len(sites) > 1 else "All fields"
-        with f2:
-            q = search_box("ap_q", "Search material or person", "Type part of a name…")
-        shown = match(pending if field == "All fields" else pending[pending.Field == field], ["Material", "Requested by"], q)
-        if shown.empty:
-            st.info("No pending request matches your search.")
+    reqs = load_money_requests()
+    if has(CEO):
+        st.subheader("Waiting for your decision")
+        pending = reqs[reqs.Status == "Pending"]
+        if pending.empty:
+            st.success("No pending money requests.")
         else:
-            bal = stock_balances(load_moves(sorted({int(i) for i in shown.site_id})))
-            have = {(int(a), int(b)): float(c) for a, b, c in zip(bal.site_id, bal.material_id, bal.Balance)}
-            st.write("Every row is one material. Choose **Approve**, **Reject** or **Decide later**, change the quantity to "
-                     "approve if needed, then press **Confirm decisions**.")
-            tbl = pd.DataFrame({
-                "Request #": shown.batch.astype(int).values, "Field": shown.Field.values, "By": shown["Requested by"].values,
-                "Material": shown.Material.values, "Unit": shown.Unit.values, "Requested": shown.Requested.values,
-                "In stock now": [have.get((int(a), int(b)), 0.0) for a, b in zip(shown.site_id, shown.material_id)],
-                "Needed by": shown["Needed by"].values, "Decision": "Approve", "Quantity to approve": shown.Requested.values,
-                "Reason if rejected": ""})
-            ed = wide(st.data_editor, tbl, hide_index=True, key=f"mdec{K('m')}_{abs(hash(tuple(int(i) for i in shown.id)))}",
-                      disabled=["Request #", "Field", "By", "Material", "Unit", "Requested", "In stock now", "Needed by"],
-                      column_config={"Decision": st.column_config.SelectboxColumn(options=["Approve", "Reject", "Decide later"], required=True),
-                                     "Quantity to approve": st.column_config.NumberColumn(min_value=0.0, step=0.01)})
-            if st.button(":material/check: Confirm decisions", type="primary", key="mdec_go"):
+            tbl = pd.DataFrame({"Request #": pending.id.values, "By": pending["Requested by"].values, "Field": pending.Field.values,
+                                "Category": pending.Category.values, "Purpose": pending.Purpose.values,
+                                "Requested": pending.Requested.values, "Needed by": pending["Needed by"].values,
+                                "Decision": "Approve", "Amount to approve": pending.Requested.values, "Reason if rejected": ""})
+            ed = wide(st.data_editor, tbl, hide_index=True, key=f"mrd{K('d')}_{abs(hash(tuple(int(i) for i in pending.id)))}",
+                      disabled=["Request #", "By", "Field", "Category", "Purpose", "Requested", "Needed by"], column_config={
+                          "Decision": st.column_config.SelectboxColumn(options=["Approve", "Reject", "Decide later"], required=True),
+                          "Amount to approve": st.column_config.NumberColumn(min_value=0, step=1000)})
+            if st.button(":material/check: Confirm decisions", type="primary", key="mrd_go"):
                 decisions, problems = {}, []
-                for rid, mat, dec, qty, why in zip(shown.id, ed["Material"], ed["Decision"], ed["Quantity to approve"], ed["Reason if rejected"]):
-                    qty = 0.0 if pd.isna(qty) else float(qty)
+                for rid, dec, amt, why in zip(pending.id, ed["Decision"], ed["Amount to approve"], ed["Reason if rejected"]):
+                    amt = 0 if pd.isna(amt) else float(amt)
                     if dec == "Approve":
-                        if qty <= 0:
-                            problems.append(mat)
+                        if amt <= 0:
+                            problems.append(f"#{int(rid)}")
                         else:
-                            decisions[int(rid)] = (qty, "")
+                            decisions[int(rid)] = (amt, "")
                     elif dec == "Reject":
-                        decisions[int(rid)] = (0.0, why.strip() if isinstance(why, str) and why.strip() else "Not approved")
+                        decisions[int(rid)] = (0, why.strip() if isinstance(why, str) and why.strip() else "Not approved")
                 if problems:
-                    st.error("Enter a quantity above 0, or choose Reject, for: " + ", ".join(problems))
+                    st.error("Enter an amount above 0, or choose Reject, for: " + ", ".join(problems))
                 elif not decisions:
                     st.warning("Nothing to confirm: every row is set to Decide later.")
                 else:
-                    err = decide_mat_requests(decisions, user)
+                    err = decide_money_requests(decisions, user)
                     if err:
                         st.error(err)
                     else:
-                        ok_n = sum(q > 0 for q, _ in decisions.values())
-                        done(f"{ok_n} approved, {len(decisions) - ok_n} rejected, {len(pending) - len(decisions)} left for later.")
-    st.subheader("All requests")
+                        ok_n = sum(a > 0 for a, _ in decisions.values())
+                        done(f"{ok_n} approved, {len(decisions) - ok_n} rejected.")
+    st.subheader("New money request")
+    st.caption("Ask the CEO for money, for example for fuel, transport, tools or materials.")
+    fc = field_choices(sites)
+    a1, a2, a3 = st.columns(3)
+    field = a1.selectbox("Field", list(fc), key=K("mf"))
+    cat = a2.selectbox("Category", money_cats(), key=K("mc"))
+    newcat = a3.text_input("or a new category", key=K("mn"))
+    b1, b2, b3 = st.columns([1, 2, 1])
+    amount = b1.number_input("Amount (Frw)", min_value=1, step=1000, value=None, placeholder="Enter amount", key=K("ma"))
+    purpose = b2.text_input("What is it for?", key=K("mp"))
+    needed = b3.date_input("Needed by", date.today() + timedelta(days=2), min_value=date.today(), key=K("md"))
+    if st.button("Send request to the CEO", type="primary", key="mr_send"):
+        if not amount or not purpose.strip():
+            st.warning("Enter the amount and what it is for.")
+        else:
+            create_money_request(fc[field], cat, newcat, purpose, amount, needed, user)
+            done(f"Request for {money(amount)} Frw sent to the CEO.")
+    mine = reqs[(reqs.Status == "Pending") & (reqs["Requested by"] == user)]
+    if len(mine):
+        st.subheader("My pending requests")
+        tbl = pd.DataFrame({"Request #": mine.id.values, "Category": mine.Category.values, "Purpose": mine.Purpose.values,
+                            "Amount": mine.Requested.values, "Remove": False})
+        ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mq')}_{len(mine)}_{int(mine.id.iloc[0])}",
+                  disabled=["Request #", "Category", "Purpose"], column_config={"Amount": st.column_config.NumberColumn(min_value=1, step=1000),
+                                                                                "Remove": st.column_config.CheckboxColumn()})
+        if st.button("Save changes", key="mq_save"):
+            removes = [int(i) for i, rm in zip(mine.id, ed["Remove"]) if rm]
+            changes = {int(i): float(a) for i, a, rm, old in zip(mine.id, ed["Amount"], ed["Remove"], mine.Requested)
+                       if not rm and pd.notna(a) and float(a) != float(old)}
+            if not removes and not changes:
+                st.info("Nothing to change.")
+            else:
+                skipped = update_money_pending(user, changes, removes)
+                done("Changes saved." + (f" {skipped} could not be changed because they were already decided." if skipped else ""))
+    if has(CEO, ACCOUNTANT):
+        appr = reqs[(reqs.Status == "Approved") & (reqs["Requested by"] != user)]
+        if len(appr):
+            st.subheader("Approved: record the payment")
+            st.caption("Tick Paid when the money has been given. It is then added to the person's money used.")
+            tbl = pd.DataFrame({"Request #": appr.id.values, "By": appr["Requested by"].values, "Field": appr.Field.values,
+                                "Category": appr.Category.values, "Purpose": appr.Purpose.values, "Approved": appr.Approved.values, "Paid": False})
+            ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mx')}_{len(appr)}_{int(appr.id.iloc[0])}",
+                      disabled=["Request #", "By", "Field", "Category", "Purpose", "Approved"],
+                      column_config={"Paid": st.column_config.CheckboxColumn()})
+            if st.button("Record payment", type="primary", key="mx_go"):
+                ids = [int(i) for i, p in zip(appr.id, ed["Paid"]) if p]
+                if not ids:
+                    st.info("Tick the requests that were paid.")
+                else:
+                    done(f"{pay_money_requests(ids, user)} payment(s) recorded.")
+    st.subheader("Requests")
     if reqs.empty:
-        st.caption("No requests yet.")
+        st.caption("No money requests yet.")
     else:
-        request_list(reqs, "ar")
+        money_list(reqs, "mrl")
 
 
-def page_matreq():
-    if st.session_state.role == CEO:
-        page_approve_mat()
+# ---------- money used ----------
+def load_ledger():
+    user = st.session_state.user
+    where, params = ("(l.kind='Business' OR l.person=?)", [user]) if has(CEO, ACCOUNTANT) else ("l.person=?", [user])
+    return df(f"""SELECT l.id, l.entered_by, l.request_id, l.spent_on AS "Date", l.person AS "Person",
+                  COALESCE(s.name, '(no field)') AS "Field", l.kind AS "Kind", l.category AS "Category", l.amount AS "Amount",
+                  l.note AS "Note" FROM money_ledger l LEFT JOIN sites s ON s.id=l.site_id WHERE {where}
+                  ORDER BY l.spent_on DESC, l.id DESC""", tuple(params))
+
+
+def parse_ledger(ed, cats, fields):
+    ok, bad = [], []
+    for pos, (_, r) in enumerate(ed.iterrows(), start=1):
+        cat = r["Category"] if pd.notna(r["Category"]) else None
+        new = str(r["New category"]).strip() if pd.notna(r["New category"]) else ""
+        amt = pd.to_numeric(r["Amount"], errors="coerce")
+        note = str(r["Note"]).strip() if pd.notna(r["Note"]) else ""
+        if not cat and not new and (pd.isna(amt) or amt == 0) and not note:
+            continue
+        d = pd.to_datetime(r["Date"], errors="coerce")
+        d = date.today() if pd.isna(d) else d.date()
+        kind = r["Kind"] if r["Kind"] in ("Business", "Personal") else "Business"
+        if not new and cat not in cats:
+            bad.append(f"Row {pos}: choose a category, or type a new one.")
+        elif pd.isna(amt) or amt <= 0:
+            bad.append(f"Row {pos}: enter the amount.")
+        elif d > date.today():
+            bad.append(f"Row {pos}: the date is in the future.")
+        else:
+            ok.append({"date": d, "category": new or cat, "new": bool(new), "amount": int(round(float(amt))), "kind": kind,
+                       "site": fields.get(r["Field"]), "note": note})
+    return ok, bad
+
+
+def add_ledger(entries, user):
+    now = datetime.now().isoformat(timespec="seconds")
+    with conn() as c:
+        for e in entries:
+            if e["new"]:
+                ensure_named(c, "money_categories", e["category"])
+        bulk_insert(c, "money_ledger", ["spent_on", "person", "site_id", "kind", "category", "amount", "note", "entered_by", "entered_at"],
+                    [(str(e["date"]), user, e["site"], e["kind"], e["category"], e["amount"], e["note"], user, now) for e in entries])
+
+
+def page_moneyused():
+    user = st.session_state.user
+    if has(CEO):
+        st.subheader("Record money I used")
+        st.caption("Money you spent yourself: materials you bought, fuel, food, personal use. Choose Business or Personal. "
+                   "Personal entries are visible only to you.")
+        cats, fields = money_cats(), field_choices(visible_sites())
+        grid = pd.DataFrame({"Date": [date.today()] * 4, "Category": [None] * 4, "New category": [""] * 4, "Amount": [0] * 4,
+                             "Kind": ["Business"] * 4, "Field": ["(no field)"] * 4, "Note": [""] * 4})
+        ed = wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K("lg"), column_config={
+            "Date": st.column_config.DateColumn("Date", max_value=date.today(), format="YYYY-MM-DD"),
+            "Category": st.column_config.SelectboxColumn("Category", options=cats, required=False),
+            "New category": st.column_config.TextColumn("New category"),
+            "Amount": st.column_config.NumberColumn("Amount (Frw)", min_value=0, step=100),
+            "Kind": st.column_config.SelectboxColumn("Kind", options=["Business", "Personal"], required=True),
+            "Field": st.column_config.SelectboxColumn("Field", options=list(fields), required=True)})
+        ok, bad = parse_ledger(ed, cats, fields)
+        if ok:
+            st.write(f"**{len(ok)} line(s) ready, total {money(sum(e['amount'] for e in ok))} Frw**")
+        for msg in bad:
+            st.warning(msg)
+        if st.button("Save money used", type="primary"):
+            if bad:
+                st.error("Please correct the lines marked above.")
+            elif not ok:
+                st.info("Nothing to save yet.")
+            else:
+                add_ledger(ok, user)
+                done(f"{len(ok)} line(s) saved.")
+    st.subheader("Money used")
+    led = load_ledger()
+    if led.empty:
+        return st.caption("Nothing recorded yet.")
+    f1, f2, f3 = st.columns([2, 2, 3])
+    kind = f1.radio("Show", ["All", "Business", "Personal"], horizontal=True, key="ml_k")
+    cat = f2.selectbox("Category", ["All categories"] + sorted(set(led.Category)), key="ml_c")
+    with f3:
+        q = search_box("ml_q", "Search note, person or field", "Type part of a word…")
+    view = led if kind == "All" else led[led.Kind == kind]
+    view = view if cat == "All categories" else view[view.Category == cat]
+    view = match(view, ["Note", "Person", "Field"], q)
+    k = st.columns(3)
+    k[0].metric("Total", money(view.Amount.sum()))
+    k[1].metric("Business", money(view[view.Kind == "Business"].Amount.sum()))
+    k[2].metric("Personal", money(view[view.Kind == "Personal"].Amount.sum()))
+    bars(view.groupby("Category", as_index=False).Amount.sum().sort_values("Amount", ascending=False).head(10), "Category", "Amount")
+    cols = ["Date", "Person", "Field", "Kind", "Category", "Amount", "Note", "request_id"]
+    shown = view.head(300)
+    mine = shown[(shown.entered_by == user) & shown.request_id.isna()]
+    wide(st.dataframe, pretty(shown[cols].rename(columns={"request_id": "Request #"}), ["Amount"]), hide_index=True)
+    if has(CEO) and len(mine):
+        with st.expander("Delete my own entries"):
+            tbl = mine[["Date", "Category", "Amount", "Note"]].copy()
+            tbl["Remove"] = False
+            ed2 = wide(st.data_editor, tbl, hide_index=True, key=f"{K('ld')}_{len(mine)}", disabled=["Date", "Category", "Amount", "Note"])
+            if st.button("Delete ticked entries", key="ml_del"):
+                ids = [int(i) for i, r in zip(mine.id, ed2["Remove"]) if r]
+                if ids:
+                    with conn() as c:
+                        for i in ids:
+                            c.execute("DELETE FROM money_ledger WHERE id=? AND entered_by=? AND request_id IS NULL", (i, user))
+                    done(f"{len(ids)} entr{'y' if len(ids) == 1 else 'ies'} deleted.")
+
+
+# ---------- taxes and debts (CEO and Accountant) ----------
+def page_taxdebt():
+    if not has(CEO, ACCOUNTANT):
+        return st.error("This page is for the CEO and the Accountant.")
+    user = st.session_state.user
+    fc = field_choices(visible_sites())
+    st.subheader("Taxes paid")
+    a1, a2, a3 = st.columns(3)
+    ttype = a1.selectbox("Tax", TAX_TYPES, key=K("tt"))
+    period = a2.text_input("Period", placeholder="For example October 2026", key=K("tp"))
+    tamount = a3.number_input("Amount (Frw)", min_value=1, step=1000, value=None, placeholder="Enter amount", key=K("ta"))
+    b1, b2, b3 = st.columns(3)
+    tday = b1.date_input("Date paid", date.today(), max_value=date.today(), key=K("td"))
+    tref = b2.text_input("Receipt or reference", key=K("tr"))
+    tfield = b3.selectbox("Field (optional)", list(fc), key=K("tf"))
+    if st.button("Save tax payment", type="primary"):
+        if not tamount:
+            st.warning("Enter the amount.")
+        else:
+            run("INSERT INTO taxes(tax_type, period, amount, paid_on, reference, site_id, entered_by) VALUES(?,?,?,?,?,?,?)",
+                (ttype, period.strip(), int(tamount), str(tday), tref.strip(), fc[tfield], user))
+            done(f"{money(tamount)} Frw of {ttype} recorded.")
+    taxes = df("""SELECT t.paid_on AS "Date", t.tax_type AS "Tax", t.period AS "Period", t.amount AS "Amount",
+                  t.reference AS "Reference", COALESCE(s.name, '(no field)') AS "Field", t.entered_by AS "By"
+                  FROM taxes t LEFT JOIN sites s ON s.id=t.site_id ORDER BY t.paid_on DESC, t.id DESC""")
+    if taxes.empty:
+        st.caption("No tax payments recorded yet.")
     else:
-        page_mat_requests()
+        q = search_box("q_tax", "Search tax, period or reference", "Type part of a word…")
+        view = match(taxes, ["Tax", "Period", "Reference", "Field"], q)
+        st.caption(f"{len(view)} payments, total {money(view.Amount.sum())} Frw")
+        bars(view.groupby("Tax", as_index=False).Amount.sum().sort_values("Amount", ascending=False), "Tax", "Amount")
+        wide(st.dataframe, pretty(view.head(300), ["Amount"]), hide_index=True)
+
+    st.subheader("Debts")
+    st.caption("Money the company owes, or money others owe the company.")
+    d1, d2, d3 = st.columns(3)
+    party = d1.text_input("Who", placeholder="Supplier, bank, client…", key=K("dp"))
+    direction = d2.selectbox("Direction", ["We owe", "Owed to us"], key=K("dd"))
+    damount = d3.number_input("Amount (Frw)", min_value=1, step=1000, value=None, placeholder="Enter amount", key=K("da"))
+    e1, e2, e3 = st.columns(3)
+    due = e1.date_input("Due date", date.today() + timedelta(days=30), key=K("de"))
+    dfield = e2.selectbox("Field (optional)", list(fc), key=K("df"))
+    dnote = e3.text_input("Note (optional)", key=K("dn"))
+    if st.button("Save debt", type="primary"):
+        if not party.strip() or not damount:
+            st.warning("Enter who and the amount.")
+        else:
+            run("INSERT INTO debts(party, direction, amount, due_on, site_id, note, entered_by, entered_on) VALUES(?,?,?,?,?,?,?,?)",
+                (party.strip(), direction, int(damount), str(due), fc[dfield], dnote.strip(), user, str(date.today())))
+            done(f"Debt with {party.strip()} saved.")
+    debts = df("""SELECT d.id, d.party AS "Who", d.direction AS "Direction", d.amount AS "Amount",
+                  COALESCE((SELECT SUM(p.amount) FROM debt_payments p WHERE p.debt_id=d.id), 0) AS "Paid",
+                  d.due_on AS "Due", COALESCE(s.name, '(no field)') AS "Field", d.note AS "Note"
+                  FROM debts d LEFT JOIN sites s ON s.id=d.site_id ORDER BY d.due_on""")
+    if debts.empty:
+        return st.caption("No debts recorded yet.")
+    debts["Balance"] = debts.Amount - debts.Paid
+    debts["Status"] = ["Settled" if b <= 0 else ("Overdue" if due_ < str(date.today()) else "Open") for b, due_ in zip(debts.Balance, debts.Due)]
+    q2 = search_box("q_debt", "Search who, field or note", "Type part of a word…")
+    view = match(debts, ["Who", "Field", "Note"], q2)
+    k = st.columns(2)
+    k[0].metric("We owe (open)", money(view[(view.Direction == "We owe") & (view.Balance > 0)].Balance.sum()))
+    k[1].metric("Owed to us (open)", money(view[(view.Direction == "Owed to us") & (view.Balance > 0)].Balance.sum()))
+    wide(st.dataframe, pretty(view.drop(columns="id"), ["Amount", "Paid", "Balance"], "Status"), hide_index=True)
+    openr = debts[debts.Balance > 0]
+    if len(openr):
+        st.markdown("**Record a payment on a debt**")
+        labels = {f"{r.Who} ({r.Direction}) - balance {money(r.Balance)}": int(r.id) for r in openr.itertuples()}
+        p1, p2, p3 = st.columns(3)
+        which = p1.selectbox("Debt", list(labels), index=None, placeholder="Choose a debt", key=K("pd"))
+        pam = p2.number_input("Amount paid (Frw)", min_value=1, step=1000, value=None, placeholder="Enter amount", key=K("pa"))
+        pday = p3.date_input("Date", date.today(), max_value=date.today(), key=K("pt"))
+        if st.button("Save payment", key="dp_save"):
+            if not which or not pam:
+                st.warning("Choose the debt and enter the amount.")
+            elif pam > float(openr[openr.id == labels[which]].Balance.iloc[0]):
+                st.error("The payment is more than the balance of this debt.")
+            else:
+                run("INSERT INTO debt_payments(debt_id, amount, paid_on, entered_by) VALUES(?,?,?,?)", (labels[which], int(pam), str(pday), user))
+                done("Payment saved.")
+
+
+# ---------- analytics: charts that follow the person's access ----------
+def count_bars(series, color=""):
+    if len(series):
+        c = series.value_counts().rename_axis("Status").reset_index(name="Number")
+        bars(c, "Status", "Number", fmt=lambda v: f"{int(v)}", color=color)
+    else:
+        st.caption("Nothing yet.")
+
+
+def month_totals(frame, date_col, val_col, months=12):
+    m = frame.assign(Month=frame[date_col].astype(str).str[:7]).groupby("Month", as_index=False)[val_col].sum()
+    return m.sort_values("Month", ascending=False).head(months)
+
+
+def page_analytics():
+    user = st.session_state.user
+    sites = visible_sites()
+    ids = [int(i) for i in sites.id]
+    st.caption("Charts for the parts of the system you can access. Several roles show several groups of charts.")
+    scope_ids, field = ids, "All fields"
+    if len(sites) > 1 or has(CEO):
+        field = st.selectbox("Field", ["All fields"] + sites.name.tolist(), key="an_field")
+        if field != "All fields":
+            scope_ids = [int(sites[sites.name == field].id.iloc[0])]
+    if not scope_ids:
+        st.info("No field is linked to your account yet, so there are no field charts.")
+    if scope_ids and has(CEO, ACCOUNTANT, FIELD):
+        exp = load_expenses(scope_ids)
+        st.subheader("Spending")
+        if exp.empty:
+            st.caption("No spending recorded yet.")
+        else:
+            st.markdown("**By category (top 10, Frw)**")
+            bars(exp.groupby("Category", as_index=False).Total.sum().sort_values("Total", ascending=False).head(10), "Category", "Total")
+            st.markdown("**By month (last 12, Frw)**")
+            bars(month_totals(exp, "Date", "Total"), "Month", "Total")
+            if field == "All fields" and len(sites) > 1:
+                st.markdown("**By field (Frw)**")
+                bars(exp.groupby("Field", as_index=False).Total.sum().sort_values("Total", ascending=False).head(10), "Field", "Total")
+        if has(CEO):
+            fnd = load_funds(ids)
+            per = sites.rename(columns={"name": "Field"})[["id", "Field"]].copy()
+            per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0).astype(int)
+            per["Spent"] = per.id.map(load_expenses(ids).groupby("site_id").Total.sum()).fillna(0).astype(int)
+            if field != "All fields":
+                per = per[per.Field == field]
+            if per["Funds received"].sum() or per.Spent.sum():
+                st.markdown("**Funds received and spent by field (Frw)**")
+                compare_bars(per.sort_values("Spent", ascending=False).head(10), "Field", "Funds received", "Spent")
+    if scope_ids:
+        st.subheader("Materials")
+        mv, reqs = load_moves(scope_ids), load_mat_requests(scope_ids)
+        bal = stock_balances(mv)
+        if bal.empty:
+            st.caption("No materials recorded yet.")
+        else:
+            st.markdown("**Largest stock balances**")
+            top = bal[bal.Balance > 1e-9].assign(Item=lambda d: d.Material + " (" + d.Unit + ")").sort_values("Balance", ascending=False).head(10)
+            bars(top, "Item", "Balance", fmt=lambda v: f"{v:,.2f}".rstrip("0").rstrip("."), color="")
+            q = mv.assign(Qty=pd.to_numeric(mv.Qty))
+            by = q[q.Type.isin(["Received", "Used"])].assign(Month=lambda d: d.Date.astype(str).str[:7])
+            if len(by):
+                st.markdown("**Deliveries and use by month (number of lines)**")
+                piv = by.groupby(["Month", "Type"]).size().unstack(fill_value=0).reindex(columns=["Received", "Used"], fill_value=0)
+                piv = piv.reset_index().sort_values("Month", ascending=False).head(6)
+                compare_bars(piv, "Month", "Received", "Used")
+        st.markdown("**Material requests by status**")
+        count_bars(reqs.Status if has(CEO, ACCOUNTANT, STORE) else reqs[reqs["Requested by"] == user].Status)
+    st.subheader("Money")
+    mr = load_money_requests()
+    st.markdown("**Money requests by status**")
+    count_bars(mr.Status)
+    if has(CEO, ACCOUNTANT):
+        led = load_ledger()
+        if len(led):
+            st.markdown("**Money used by category (Frw)**")
+            bars(led[led.Kind == "Business"].groupby("Category", as_index=False).Amount.sum().sort_values("Amount", ascending=False).head(10),
+                 "Category", "Amount")
+        taxes = df("""SELECT tax_type AS "Tax", SUM(amount) AS "Amount" FROM taxes GROUP BY tax_type""")
+        if len(taxes):
+            st.markdown("**Taxes paid (Frw)**")
+            bars(taxes.sort_values("Amount", ascending=False), "Tax", "Amount")
+        debts = df("""SELECT d.direction AS "Direction", d.amount - COALESCE((SELECT SUM(p.amount) FROM debt_payments p WHERE p.debt_id=d.id), 0) AS "Balance"
+                      FROM debts d""")
+        if len(debts) and (debts.Balance > 0).any():
+            st.markdown("**Open debts (Frw)**")
+            bars(debts[debts.Balance > 0].groupby("Direction", as_index=False).Balance.sum(), "Direction", "Balance")
 
 
 # ---------- fields and categories ----------
@@ -1616,10 +2211,9 @@ def add_site(name, client, location, budget, start):
 
 
 def page_setup():
-    role = st.session_state.role
-    if role not in (CEO, ACCOUNTANT):
+    if not has(CEO, ACCOUNTANT):
         return st.error("This page is for the CEO and the Accountant.")
-    if role == CEO:
+    if has(CEO):
         setup_fields()
     setup_categories()
 
@@ -1761,8 +2355,7 @@ def import_costs(site_id, rows, user, fname, funds=None, funds_date=None):
 
 
 def page_import():
-    role = st.session_state.role
-    if role not in (CEO, ACCOUNTANT):
+    if not has(CEO, ACCOUNTANT):
         return st.error("Only the CEO and the Accountant can import workbooks.")
     st.write("Upload your cost workbook (one sheet per cost category, with a SUMMARY sheet). Every row is checked "
              "before anything is saved.")
@@ -1784,7 +2377,7 @@ def page_import():
         st.warning("Some sheets differ from their own grand total (rows without a date or an amount). Check them in Excel.")
     sites = visible_sites()
     site_ids = dict(zip(sites.name, sites.id.astype(int)))
-    options = (["New field…"] if role == CEO else []) + list(site_ids)
+    options = (["New field…"] if has(CEO) else []) + list(site_ids)
     if not options:
         return no_field_message()
     target = st.selectbox("Import into which field?", options, key=K("it"))
@@ -1794,7 +2387,7 @@ def page_import():
         new_name = n1.text_input("New field name", key=K("inn"))
         new_client = n2.text_input("Client", key=K("inc"))
     add_funds = False
-    if funds and role in FUNDS_VISIBLE:
+    if funds and has(*FUNDS_VISIBLE):
         add_funds = st.checkbox(f"Also record the funds received found in the SUMMARY sheet ({money(funds)} Frw)", value=True, key=K("ifd"))
     again = True
     if target != "New field…":
@@ -1833,7 +2426,7 @@ def page_reports():
     wide(st.dataframe, pretty(by_cat, ["Amount"]), hide_index=True)
     sheets = {"By category": by_cat, "By month": by_month,
               "Transactions": sel[["Date", "Field", "Category", "Item", "Qty", "Unit price", "Total", "Entered by"]]}
-    if st.session_state.role in FUNDS_VISIBLE:  # funds received are for the CEO only
+    if has(*FUNDS_VISIBLE):  # funds received are for the CEO only
         fnd = load_funds(ids)
         per = sites.rename(columns={"name": "Field"})[["id", "Field"]].copy()
         per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0).astype(int)
@@ -1853,89 +2446,124 @@ def set_user_sites(uid, site_ids):
 
 
 def page_users():
-    if st.session_state.role != CEO:
+    if not has(CEO):
         return st.error("Only the CEO can manage users.")
     me = st.session_state.uid
     sites = df("SELECT id, name FROM sites ORDER BY name")
     site_ids = dict(zip(sites.name, sites.id.astype(int)))
-    users = df("SELECT id, username, role, email FROM users ORDER BY role, username")
-    links = df("SELECT u.user_id, s.name FROM user_sites u JOIN sites s ON s.id=u.site_id")
-    mine = {int(k): sorted(v.tolist()) for k, v in links.groupby("user_id")["name"]} if len(links) else {}
-    show = users.assign(Fields=[("All fields" if r in SEE_ALL else ", ".join(mine.get(int(i), [])))
-                                for i, r in zip(users.id, users.role)])
+    users = df("SELECT id, username, role, email FROM users ORDER BY username")
+    links, rl = df("SELECT u.user_id, s.name FROM user_sites u JOIN sites s ON s.id=u.site_id"), df("SELECT user_id, role FROM user_roles")
+    fields_of = {int(k): sorted(v.tolist()) for k, v in links.groupby("user_id")["name"]} if len(links) else {}
+    roles_of = {int(k): sorted(v.tolist()) for k, v in rl.groupby("user_id")["role"]} if len(rl) else {}
+    show = pd.DataFrame({
+        "User name": users.username.values,
+        "Roles": [", ".join(roles_of.get(int(i), [r])) for i, r in zip(users.id, users.role)],
+        "Email": users.email.fillna("").values,
+        "Fields": ["All fields" if CEO in roles_of.get(int(i), [r]) else ", ".join(fields_of.get(int(i), []))
+                   for i, r in zip(users.id, users.role)]})
     q = search_box("q_users", "Search user", "Type part of a name…")
-    wide(st.dataframe, match(show.drop(columns="id").rename(columns={"username": "User name", "role": "Role", "email": "Email"}),
-                             ["User name", "Role", "Email", "Fields"], q), hide_index=True)
+    view = match(show, ["User name", "Roles", "Email", "Fields"], q).reset_index(drop=True)
+    st.caption("Click a row to edit that user, or choose the user from the list below the table.")
+    try:
+        ev = wide(st.dataframe, view, hide_index=True, on_select="rerun", selection_mode="single-row", key="users_tbl")
+        rows = list(ev.selection.rows) if ev is not None else []
+    except TypeError:  # an older Streamlit without row selection: the list below is used
+        wide(st.dataframe, view, hide_index=True)
+        rows = []
     with st.expander("Add a user"):
-        st.caption("The CEO sees all fields. Every other role works only on the field(s) you choose here.")
+        st.caption("Choose one or more roles. The CEO sees all fields. Every other user needs at least one field.")
         a1, a2 = st.columns(2)
         nu = a1.text_input("User name", key=K("nu"))
-        nr = a2.selectbox("Role", ROLES, index=3, key=K("nr"))
+        nroles = a2.multiselect("Roles", ROLES, default=[FIELD], key=K("nr"))
         ne = a1.text_input("Email (optional, used to reset a forgotten password)", key=K("ne"))
         npw = a2.text_input("Temporary password (at least 8 characters)", type="password", key=K("np"))
-        ns = st.multiselect("Fields this user works on", list(site_ids), key=K("ns")) if nr != CEO else []
+        ns = st.multiselect("Fields this user works on", list(site_ids), key=K("ns")) if nroles and CEO not in nroles else []
         if st.button("Add user"):
             err = None
-            if nr != CEO and not ns:
+            if not nroles:
+                err = "Choose at least one role."
+            elif CEO not in nroles and not ns:
                 err = "Choose at least one field for this user." if site_ids else "Create a field first (Fields & categories)."
-            err = err or add_user(nu, nr, ne, npw)
+            err = err or add_user_roles(nu, nroles, ne, npw)
             if err:
                 st.error(err)
             else:
                 set_user_sites(int(df("SELECT id FROM users WHERE lower(username)=lower(?)", (nu.strip(),))["id"][0]),
                                [site_ids[n] for n in ns])
                 done(f"User {nu.strip()} added.")
-    with st.expander("Change fields, change a password or delete a user"):
-        labels = {f"{r.username} ({r.role})": (int(r.id), r.role, r.username) for r in users.itertuples()}
-        who = st.selectbox("User", list(labels), index=None, placeholder="Choose a user", key=K("wu"))
-        if who:
-            uid, role, uname = labels[who]
-            if role != CEO:
-                cur = st.multiselect("Fields this user works on", list(site_ids), default=mine.get(uid, []), key=K(f"wf{uid}"))
-                if st.button("Save fields"):
-                    if not cur:
-                        st.error("A user needs at least one field.")
-                    else:
-                        set_user_sites(uid, [site_ids[n] for n in cur])
-                        done(f"Fields saved for {uname}.")
-            pw = st.text_input("New password (at least 8 characters)", type="password", key=K("wp"))
-            sure = st.checkbox("I am sure I want to delete this user", key=K("ws"))
-            w1, w2 = st.columns(2)
-            if w1.button("Set new password"):
-                err = set_user_password(uid, pw)
-                if err:
-                    st.error(err)
-                else:
-                    done(f"Password changed for {uname}.")
-            if w2.button("Delete this user"):
-                err = delete_user(uid, me) if sure else "Tick the box to confirm."
-                if err:
-                    st.error(err)
-                else:
-                    run("DELETE FROM user_sites WHERE user_id=?", (uid,))
-                    done(f"{uname} deleted.")
+    labels = {f"{u} ({show.Roles[i]})": int(users.id[i]) for i, u in enumerate(users.username)}
+    who = st.selectbox("Or choose a user from the list", list(labels), index=None, placeholder="Search and choose a user", key=K("wu"))
+    uid = labels[who] if who else (int(users[users.username == view["User name"].iloc[rows[0]]].id.iloc[0]) if rows else None)
+    if uid is None:
+        return
+    uname = users[users.id == uid].username.iloc[0]
+    st.subheader(f"Edit {uname}")
+    st.caption("The user gets the pages of every role you tick the next time they open a page.")
+    cur_roles, cur_fields = roles_of.get(uid, []), fields_of.get(uid, [])
+    nr = st.multiselect("Roles", ROLES, default=[r for r in cur_roles if r in ROLES], key=K(f"er{uid}"))
+    nf = st.multiselect("Fields this user works on", list(site_ids), default=[f for f in cur_fields if f in site_ids],
+                        key=K(f"ef{uid}")) if CEO not in nr else cur_fields
+    if st.button("Save roles and fields"):
+        ceos = [i for i, r in roles_of.items() if CEO in r]
+        if not nr:
+            st.error("Choose at least one role.")
+        elif CEO not in nr and not nf:
+            st.error("A user without the CEO role needs at least one field.")
+        elif uid in ceos and CEO not in nr and len(ceos) <= 1:
+            st.error("There must be at least one CEO.")
+        else:
+            set_user_roles(uid, nr)
+            if CEO not in nr:
+                set_user_sites(uid, [site_ids[n] for n in nf])
+            done(f"Roles and fields saved for {uname}.")
+    p1, p2 = st.columns(2)
+    pw = p1.text_input("New password (at least 8 characters)", type="password", key=K("wp"))
+    if p1.button("Set new password"):
+        err = set_user_password(uid, pw)
+        if err:
+            st.error(err)
+        else:
+            done(f"Password changed for {uname}.")
+    sure = p2.checkbox("I am sure I want to delete this user", key=K("ws"))
+    if p2.button("Delete this user"):
+        err = delete_user_full(uid, me) if sure else "Tick the box to confirm."
+        if err:
+            st.error(err)
+        else:
+            done(f"{uname} deleted.")
 
 
 # ---------- main ----------
-PAGES = {
-    CEO: [("dashboard", "Dashboard", "dashboard"), ("stock", "Material stock", "inventory_2"),
-          ("matreq", "Material requests", "shopping_cart"), ("expenses", "Expenses", "receipt_long"),
-          ("funds", "Funds received", "payments"),
-          ("import", "Import from Excel", "upload_file"), ("setup", "Fields & categories", "construction"),
-          ("reports", "Reports", "assessment"), ("users", "Users", "group")],
-    ACCOUNTANT: [("dashboard", "Dashboard", "dashboard"), ("expenses", "Expenses", "receipt_long"),
-                 ("import", "Import from Excel", "upload_file"), ("stock", "Material stock", "inventory_2"),
-                 ("matreq", "Material requests", "shopping_cart"), ("setup", "Categories", "construction"), ("reports", "Reports", "assessment")],
-    FIELD: [("dashboard", "Dashboard", "dashboard"), ("expenses", "Expenses", "receipt_long"),
-            ("stock", "Material stock", "inventory_2"), ("matreq", "Request materials", "shopping_cart"),
-            ("reports", "Reports", "assessment")],
-    STORE: [("stock", "Dashboard", "dashboard"), ("matreq", "Request materials", "shopping_cart"),
-            ("receive", "Materials received", "move_to_inbox"),
-            ("use", "Materials used", "outbox"), ("count", "Stock count", "fact_check")],
-}
+PAGE_DEFS = [  # key, label, icon, roles that get the page. A user with several roles gets all their pages.
+    ("dashboard", "Dashboard", "dashboard", (CEO, ACCOUNTANT, FIELD)),
+    ("stock", "Material stock", "inventory_2", ALL),
+    ("analytics", "Analytics", "monitoring", ALL),
+    ("matreq", "Material requests", "shopping_cart", ALL),
+    ("receive", "Materials received", "move_to_inbox", (STORE,)),
+    ("use", "Materials used", "outbox", (STORE,)),
+    ("count", "Stock count", "fact_check", (STORE,)),
+    ("expenses", "Expenses", "receipt_long", (CEO, ACCOUNTANT, FIELD)),
+    ("moneyreq", "Money requests", "request_quote", ALL),
+    ("moneyused", "Money used", "account_balance_wallet", ALL),
+    ("funds", "Funds received", "payments", (CEO,)),
+    ("taxdebt", "Taxes & debts", "gavel", (CEO, ACCOUNTANT)),
+    ("import", "Import from Excel", "upload_file", (CEO, ACCOUNTANT)),
+    ("setup", "Fields & categories", "construction", (CEO, ACCOUNTANT)),
+    ("reports", "Reports", "assessment", (CEO, ACCOUNTANT, FIELD)),
+    ("users", "Users", "group", (CEO,)),
+]
 RENDER = {"dashboard": page_dashboard, "expenses": page_expenses, "funds": page_funds, "import": page_import,
           "setup": page_setup, "reports": page_reports, "users": page_users, "stock": page_stock,
-          "receive": page_receive, "use": page_use, "count": page_count, "matreq": page_matreq}
+          "receive": page_receive, "use": page_use, "count": page_count, "matreq": page_matreq,
+          "analytics": page_analytics, "moneyreq": page_moneyreq, "moneyused": page_moneyused, "taxdebt": page_taxdebt}
+
+
+def allowed_pages():
+    out = []
+    for key, label, icon, roles in PAGE_DEFS:
+        if has(*roles):
+            out.append((key, "Dashboard" if key == "stock" and not has(CEO, ACCOUNTANT, FIELD) else label, icon))
+    return out
 
 
 def main():
@@ -1949,20 +2577,22 @@ def main():
     if me is None:  # the account was deleted
         st.session_state.clear()
         st.rerun()
+    roles = load_roles(st.session_state.uid) or [me["role"]]  # read at every step, so new responsibilities apply at once
+    st.session_state.roles, st.session_state.role = roles, ", ".join(roles)
     if not me["email"] and not st.session_state.get("skip_email"):
         email_prompt()
         return
     st.markdown(SIDEBAR_CSS, unsafe_allow_html=True)
     with st.sidebar:
         if LOGO_URI:
-            st.image(LOGO, width=150)
+            st.markdown(f'<img src="{LOGO_URI}" style="width:150px">', unsafe_allow_html=True)
         st.markdown("### Inchars PD Group")
         st.caption("Construction Management")
         st.divider()
-    counts = None
-    if st.session_state.role == CEO:  # number of material requests waiting for the CEO
-        counts = {"matreq": int(df("SELECT COUNT(DISTINCT batch) AS n FROM material_requests WHERE status='Pending'")["n"][0])}
-    sec, title = side_menu(PAGES[st.session_state.role], counts)
+    counts = {}
+    if has(CEO, ACCOUNTANT):  # requests waiting for this person
+        counts["matreq"], counts["moneyreq"] = pending_material_requests(), pending_money_requests()
+    sec, title = side_menu(allowed_pages(), counts)
     header(title)
     show_flash()
     RENDER[sec]()
