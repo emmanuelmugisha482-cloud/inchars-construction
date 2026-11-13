@@ -2676,12 +2676,32 @@ def category_pick(key):
 
 
 def sheet_editor(key, rows=5):
-    grid = pd.DataFrame({"Date": [date.today()] * rows, "Item": [""] * rows, "Qty": [1.0] * rows, "P/U": [0.0] * rows})
-    return wide(st.data_editor, grid, num_rows="dynamic", hide_index=True, key=K(key), column_config={
-        "Date": st.column_config.DateColumn("Date", max_value=date.today(), format="YYYY-MM-DD"),
-        "Item": st.column_config.TextColumn("Item"),
-        "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.01),
-        "P/U": st.column_config.NumberColumn("P/U (Frw)", min_value=0.0, step=1)})
+    """Rows written like in Excel: Date, Item, Qty, P/U and the Total of every row, live, with the Grand total below."""
+    n_key = K(key + "_n")
+    n = st.session_state.get(n_key, rows)
+    widths = [0.5, 1.6, 3.2, 1.0, 1.6, 1.7]
+    head = st.columns(widths)
+    for col, t in zip(head, ["No", "Date", "Item", "Qty", "P/U (Frw)", "Total"]):
+        col.markdown(f"**{t}**")
+    recs, grand = [], 0.0
+    for i in range(n):
+        c = st.columns(widths)
+        c[0].markdown(f"{i + 1}")
+        d = c[1].date_input("Date", date.today(), max_value=date.today(), key=f"{K(key)}_d{i}", label_visibility="collapsed")
+        item = c[2].text_input("Item", key=f"{K(key)}_t{i}", placeholder="Item", label_visibility="collapsed")
+        q = c[3].number_input("Qty", min_value=0.0, value=1.0, step=1.0, key=f"{K(key)}_q{i}", label_visibility="collapsed")
+        p = c[4].number_input("P/U", min_value=0.0, value=None, step=100.0, key=f"{K(key)}_p{i}", placeholder="0", label_visibility="collapsed")
+        line = float(q or 0) * float(p or 0)
+        grand += line
+        c[5].markdown(f"<div style='padding-top:6px;font-weight:700;text-align:right'>{money(line)}</div>", unsafe_allow_html=True)
+        recs.append({"Date": d, "Item": item, "Qty": q, "P/U": p})
+    foot = st.columns(widths)
+    if foot[1].button("+ Add 5 rows", key=f"{K(key)}_more"):
+        st.session_state[n_key] = n + 5
+        st.rerun()
+    foot[2].markdown("<div style='text-align:right;padding-top:6px'><b>Total</b></div>", unsafe_allow_html=True)
+    foot[5].markdown(f"<div style='padding-top:6px;font-weight:800;text-align:right;border-top:2px solid #0b6a35'>{money(grand)}</div>", unsafe_allow_html=True)
+    return pd.DataFrame(recs, columns=["Date", "Item", "Qty", "P/U"])
 
 
 def parse_sheet(ed):
@@ -2758,6 +2778,32 @@ def cost_frame(exp):
 
 
 # ---------- charts (Altair; if a chart cannot be drawn the page still works) ----------
+SERIES_COLORS = {"Spent": "#e0922f", "Funds received": "#0b6a35", "Received": "#2f6fb0", "Used": "#e0922f", "Spent (cumulative)": "#e0922f",
+                 "Money used": "#8e5ea2", "Transactions": "#2f6fb0", "In stock": "#0b6a35", "Out of stock": "#c9453b"}
+AXIS_EXPR = ("datum.value >= 1000000 ? format(datum.value/1000000, ',.1f') + 'M' : "
+             "datum.value >= 1000 ? format(datum.value/1000, ',.0f') + 'K' : datum.value")
+
+
+def short(v):
+    """12,345,678 -> 12.3M, so labels on charts stay short and readable."""
+    v = float(v)
+    a = abs(v)
+    if a >= 1e9:
+        return f"{v / 1e9:.1f}B"
+    if a >= 1e6:
+        return f"{v / 1e6:.1f}M"
+    if a >= 1e3:
+        return f"{v / 1e3:.0f}K"
+    return f"{v:,.0f}" if float(v).is_integer() else f"{v:,.1f}"
+
+
+def month_label(m, with_year=True):
+    try:
+        return datetime.strptime(m + "-01", "%Y-%m-%d").strftime("%b %Y" if with_year else "%b")
+    except Exception:
+        return str(m)
+
+
 def _alt():
     try:
         import altair as alt
@@ -2773,103 +2819,202 @@ def _recs(frame, cols):
     return out
 
 
-def _show(chart):
-    wide(st.altair_chart, chart)
+def _draw(chart, key=None, select=False):
+    """Draw a chart across the page width. With select=True a click on a bar is returned (needs a recent Streamlit)."""
+    attempts = []
+    if select:
+        attempts += [dict(width="stretch", on_select="rerun", key=key), dict(use_container_width=True, on_select="rerun", key=key)]
+    attempts += [dict(width="stretch"), dict(use_container_width=True)]
+    for kw in attempts:
+        try:
+            return st.altair_chart(chart, **kw)
+        except TypeError:
+            continue
+    return None
 
 
-def c_bar(frame, label, value, fmt=",.0f", horizontal=True, color=None):
-    """Bars, biggest first. Falls back to the simple HTML bars when Altair is not available."""
+def _none(msg="Nothing to show yet."):
+    st.caption(msg)
+
+
+PAD = {"left": 8, "right": 48, "top": 14, "bottom": 8}
+
+
+def c_bar(frame, label, value, horizontal=True, highlight=None, xtitle=None, unit="Frw", key=None, select=False, color=None):
+    """Bars with the value written at the end of each bar. Returns the clicked label when select=True."""
     if frame is None or frame.empty:
-        return st.caption("Nothing to show yet.")
+        return _none()
     alt = _alt()
     try:
-        data = alt.Data(values=_recs(frame, [label, value]))
-        tip = [alt.Tooltip(f"{label}:N"), alt.Tooltip(f"{value}:Q", format=fmt)]
+        rec = frame[[label, value]].copy()
+        rec["Label"] = [short(v) for v in rec[value]]
+        rec["Hi"] = [bool(highlight) and str(l) == str(highlight) for l in rec[label]]
+        top = max(float(rec[value].max()), 1.0)
+        data = alt.Data(values=_recs(rec, [label, value, "Label", "Hi"]))
+        base = alt.Chart(data)
+        col = alt.condition("datum.Hi", alt.value("#e0922f"), alt.value(color or "#0b6a35"))
+        tip = [alt.Tooltip(f"{label}:N", title=label), alt.Tooltip(f"{value}:Q", format=",.0f", title=unit)]
         if horizontal:
-            ch = alt.Chart(data).mark_bar(color=color or PALETTE[0], cornerRadiusEnd=4).encode(
-                y=alt.Y(f"{label}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=220)),
-                x=alt.X(f"{value}:Q", title=None), tooltip=tip).properties(height=max(110, 28 * len(frame)))
+            y = alt.Y(f"{label}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260, labelFontSize=12, ticks=False, domain=False))
+            x = alt.X(f"{value}:Q", title=xtitle or unit, scale=alt.Scale(domain=[0, top * 1.22], nice=False),
+                      axis=alt.Axis(labelExpr=AXIS_EXPR, grid=True, tickCount=5, title=xtitle or unit))
+            bars = base.mark_bar(cornerRadiusEnd=4, size=20).encode(y=y, x=x, color=col, tooltip=tip)
+            txt = base.mark_text(align="left", dx=5, fontSize=12, fontWeight="bold", color="#1d2b22").encode(y=y, x=x, text="Label:N")
+            height = max(120, 32 * len(rec) + 40)
         else:
-            ch = alt.Chart(data).mark_bar(color=color or PALETTE[0], cornerRadiusEnd=4).encode(
-                x=alt.X(f"{label}:N", sort=None, title=None, axis=alt.Axis(labelAngle=-30)),
-                y=alt.Y(f"{value}:Q", title=None), tooltip=tip).properties(height=240)
-        _show(ch)
+            x = alt.X(f"{label}:N", sort=None, title=xtitle, axis=alt.Axis(labelAngle=-35, labelLimit=140, labelFontSize=11, ticks=False))
+            y = alt.Y(f"{value}:Q", title=unit, scale=alt.Scale(domain=[0, top * 1.2], nice=False), axis=alt.Axis(labelExpr=AXIS_EXPR, tickCount=5))
+            bars = base.mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(x=x, y=y, color=col, tooltip=tip)
+            txt = base.mark_text(align="center", dy=-8, fontSize=11, fontWeight="bold", color="#1d2b22").encode(x=x, y=y, text="Label:N")
+            height = 290
+        if select:
+            pick = alt.selection_point(name="pick", fields=[label])
+            bars = bars.add_params(pick).encode(opacity=alt.condition(pick, alt.value(1), alt.value(0.6)))
+        ev = _draw((bars + txt).properties(height=height, padding=PAD), key=key, select=select)
+        if select and ev is not None:
+            sel = getattr(ev, "selection", None)
+            if sel is None and isinstance(ev, dict):
+                sel = ev.get("selection")
+            items = (sel or {}).get("pick") or []
+            return items[0].get(label) if items else None
     except Exception:
-        bars(frame, label, value, fmt=lambda v: f"{v:,.0f}")
+        bars_html(frame, label, value)
+    return None
 
 
-def c_donut(frame, label, value, center=None):
+def bars_html(frame, label, value):
+    bars(frame, label, value, fmt=lambda v: f"{v:,.0f}")
+
+
+def legend_html(frame, label, value, colors):
+    total = max(float(frame[value].sum()), 1e-9)
+    items = "".join(f'<div class="lg"><span class="dot" style="background:{c}"></span><span class="ln">{html.escape(str(l))}</span>'
+                    f'<span class="lv">{short(v)} · {float(v) / total * 100:.0f}%</span></div>'
+                    for l, v, c in zip(frame[label], frame[value], colors))
+    st.markdown(f'<div class="legend">{items}</div>', unsafe_allow_html=True)
+
+
+def c_donut(frame, label, value, center=None, colors=None):
+    """Donut in a fixed square (never clipped) with the legend written under it."""
     if frame is None or frame.empty or float(frame[value].sum()) <= 0:
-        return st.caption("Nothing to show yet.")
+        return _none()
+    frame = frame[frame[value] > 0].reset_index(drop=True)
+    cols = (colors or PALETTE)
+    cols = [cols[i % len(cols)] for i in range(len(frame))]
     alt = _alt()
     try:
-        data = alt.Data(values=_recs(frame, [label, value]))
-        arc = alt.Chart(data).mark_arc(innerRadius=62, outerRadius=105).encode(
-            theta=alt.Theta(f"{value}:Q"),
-            color=alt.Color(f"{label}:N", scale=alt.Scale(range=PALETTE), legend=alt.Legend(title=None, orient="bottom")),
-            tooltip=[alt.Tooltip(f"{label}:N"), alt.Tooltip(f"{value}:Q", format=",.0f")])
+        rec = frame[[label, value]].copy()
+        rec["Pct"] = rec[value] / rec[value].sum() * 100
+        data = alt.Data(values=_recs(rec, [label, value, "Pct"]))
+        arc = alt.Chart(data).mark_arc(innerRadius=68, outerRadius=108, stroke="white", strokeWidth=2).encode(
+            theta=alt.Theta(f"{value}:Q", stack=True),
+            color=alt.Color(f"{label}:N", scale=alt.Scale(domain=list(rec[label]), range=cols), legend=None),
+            tooltip=[alt.Tooltip(f"{label}:N"), alt.Tooltip(f"{value}:Q", format=",.0f"), alt.Tooltip("Pct:Q", format=".1f", title="%")])
+        ch = arc
         if center:
-            arc = arc + alt.Chart(alt.Data(values=[{"t": center}])).mark_text(size=26, fontWeight="bold", color="#0a3d1f").encode(text="t:N")
-        _show(arc.properties(height=260))
+            ch = arc + alt.Chart(alt.Data(values=[{"t": center}])).mark_text(size=26, fontWeight="bold", color="#0f2a1d").encode(text="t:N")
+        _draw(ch.properties(height=240, padding={"left": 10, "right": 10, "top": 10, "bottom": 10}))
+        legend_html(frame, label, value, cols)
     except Exception:
-        bars(frame, label, value, fmt=lambda v: f"{v:,.0f}")
+        bars_html(frame, label, value)
 
 
 def _long(frame, x, ys):
     return pd.DataFrame([{x: r[x], "Series": y, "Value": float(r[y])} for _, r in frame.iterrows() for y in ys])
 
 
-def c_lines(frame, x, ys, area=False):
-    """One or several lines over time (x is the month)."""
+def alt_scale(ys):
+    alt = _alt()
+    rng = [SERIES_COLORS.get(y, PALETTE[i % len(PALETTE)]) for i, y in enumerate(ys)]
+    return alt.Scale(domain=list(ys), range=rng)
+
+
+def c_lines(frame, x, ys, area=False, ytitle="Frw", xtitle="Month"):
+    """Lines over the months, with the value written at each point (or at the last point when there are many)."""
     if frame is None or frame.empty:
-        return st.caption("Nothing to show yet.")
+        return _none()
     alt = _alt()
     try:
-        data = alt.Data(values=_recs(_long(frame, x, ys), [x, "Series", "Value"]))
+        lg = _long(frame, x, ys)
+        lg["Label"] = [short(v) for v in lg.Value]
+        n = frame[x].nunique()
+        lg["Show"] = True if (len(ys) == 1 and n <= 14) else [i == n - 1 or False for i in lg.groupby("Series").cumcount()]
+        top = max(float(lg.Value.max()), 1.0)
+        data = alt.Data(values=_recs(lg, [x, "Series", "Value", "Label", "Show"]))
         base = alt.Chart(data).encode(
-            x=alt.X(f"{x}:O", sort=None, title=None, axis=alt.Axis(labelAngle=-30)), y=alt.Y("Value:Q", title=None),
-            color=alt.Color("Series:N", scale=alt.Scale(range=PALETTE), legend=alt.Legend(title=None, orient="bottom")),
-            tooltip=[alt.Tooltip(f"{x}:O"), alt.Tooltip("Series:N"), alt.Tooltip("Value:Q", format=",.0f")])
-        ch = base.mark_line(point=True, strokeWidth=2.5)
-        if area:
-            ch = base.mark_area(opacity=0.25, line=True)
-        _show(ch.properties(height=260))
+            x=alt.X(f"{x}:O", sort=None, title=xtitle, axis=alt.Axis(labelAngle=-35, labelFontSize=11)),
+            y=alt.Y("Value:Q", title=ytitle, scale=alt.Scale(domain=[0, top * 1.18], nice=False), axis=alt.Axis(labelExpr=AXIS_EXPR, tickCount=5)),
+            color=alt.Color("Series:N", scale=alt_scale(ys), legend=alt.Legend(title=None, orient="top")),
+            tooltip=[alt.Tooltip(f"{x}:O", title=xtitle), alt.Tooltip("Series:N"), alt.Tooltip("Value:Q", format=",.0f", title="Frw")])
+        layers = [base.mark_line(strokeWidth=3), base.mark_point(size=60, filled=True)]
+        if area and len(ys) == 1:
+            layers.insert(0, base.mark_area(opacity=0.15))
+        layers.append(base.transform_filter("datum.Show").mark_text(dy=-11, fontSize=11, fontWeight="bold").encode(text="Label:N"))
+        ch = layers[0]
+        for extra in layers[1:]:
+            ch = ch + extra
+        _draw(ch.properties(height=290, padding=PAD))
     except Exception:
         st.caption("This chart could not be drawn.")
 
 
-def c_grouped(frame, x, ys, stacked=False):
-    """Several bars side by side (or stacked) for every x."""
+def c_grouped(frame, x, ys, stacked=False, ytitle="Frw", xtitle=None):
+    """Several bars side by side (or stacked) for every x, with the values written on the bars."""
     if frame is None or frame.empty:
-        return st.caption("Nothing to show yet.")
+        return _none()
     alt = _alt()
     try:
-        data = alt.Data(values=_recs(_long(frame, x, ys), [x, "Series", "Value"]))
-        enc = dict(x=alt.X(f"{x}:N", sort=None, title=None, axis=alt.Axis(labelAngle=-30, labelLimit=140)),
-                   y=alt.Y("Value:Q", title=None),
-                   color=alt.Color("Series:N", scale=alt.Scale(range=PALETTE), legend=alt.Legend(title=None, orient="bottom")),
-                   tooltip=[alt.Tooltip(f"{x}:N"), alt.Tooltip("Series:N"), alt.Tooltip("Value:Q", format=",.0f")])
+        lg = _long(frame, x, ys)
+        lg["Label"] = [short(v) if v else "" for v in lg.Value]
+        top = float(lg.groupby(x).Value.sum().max()) if stacked else float(lg.Value.max())
+        data = alt.Data(values=_recs(lg, [x, "Series", "Value", "Label"]))
+        enc = dict(x=alt.X(f"{x}:N", sort=None, title=xtitle, axis=alt.Axis(labelAngle=-35, labelLimit=150, labelFontSize=11, ticks=False)),
+                   y=alt.Y("Value:Q", title=ytitle, scale=alt.Scale(domain=[0, max(top, 1.0) * 1.18], nice=False),
+                           axis=alt.Axis(labelExpr=AXIS_EXPR, tickCount=5)),
+                   color=alt.Color("Series:N", scale=alt_scale(ys), legend=alt.Legend(title=None, orient="top")),
+                   tooltip=[alt.Tooltip(f"{x}:N", title=xtitle or "Group"), alt.Tooltip("Series:N"), alt.Tooltip("Value:Q", format=",.0f")])
         if not stacked:
             enc["xOffset"] = alt.XOffset("Series:N")
-        _show(alt.Chart(data).mark_bar(cornerRadiusEnd=3).encode(**enc).properties(height=270))
+        bars = alt.Chart(data).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(**enc)
+        ch = bars
+        if not stacked and frame[x].nunique() * len(ys) <= 24:
+            ch = bars + alt.Chart(data).mark_text(dy=-7, fontSize=10, fontWeight="bold").encode(
+                x=enc["x"], y=enc["y"], xOffset=alt.XOffset("Series:N"), text="Label:N")
+        _draw(ch.properties(height=300, padding=PAD))
     except Exception:
         st.caption("This chart could not be drawn.")
 
 
 def c_heat(frame, x, y, value):
     if frame is None or frame.empty:
-        return st.caption("Nothing to show yet.")
+        return _none()
     alt = _alt()
     try:
-        data = alt.Data(values=_recs(frame, [x, y, value]))
-        ch = alt.Chart(data).mark_rect(cornerRadius=3).encode(
-            x=alt.X(f"{x}:O", sort=None, title=None, axis=alt.Axis(labelAngle=-30)),
-            y=alt.Y(f"{y}:N", title=None, axis=alt.Axis(labelLimit=200)),
-            color=alt.Color(f"{value}:Q", scale=alt.Scale(range=["#e8f3ec", "#0b6a35"]), legend=None),
-            tooltip=[alt.Tooltip(f"{x}:O"), alt.Tooltip(f"{y}:N"), alt.Tooltip(f"{value}:Q", format=",.0f")])
-        _show(ch.properties(height=max(150, 30 * frame[y].nunique())))
+        rec = frame[[x, y, value]].copy()
+        rec["Label"] = [short(v) for v in rec[value]]
+        data = alt.Data(values=_recs(rec, [x, y, value, "Label"]))
+        base = alt.Chart(data).encode(x=alt.X(f"{x}:O", sort=None, title=None, axis=alt.Axis(labelAngle=-35, orient="top")),
+                                      y=alt.Y(f"{y}:N", title=None, axis=alt.Axis(labelLimit=240)))
+        rect = base.mark_rect(cornerRadius=3).encode(color=alt.Color(f"{value}:Q", scale=alt.Scale(range=["#e8f3ec", "#0b6a35"]), legend=None),
+                                                      tooltip=[alt.Tooltip(f"{x}:O"), alt.Tooltip(f"{y}:N"), alt.Tooltip(f"{value}:Q", format=",.0f")])
+        txt = base.mark_text(fontSize=10).encode(text="Label:N", color=alt.condition(f"datum.{value} > {float(rec[value].max()) * 0.55}", alt.value("white"), alt.value("#1d2b22")))
+        _draw((rect + txt).properties(height=max(160, 34 * rec[y].nunique() + 40), padding=PAD))
     except Exception:
         st.caption("This chart could not be drawn.")
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def card(title, sub="", data=None, key="x"):
+    """A white card: bold title, grey one-line description, the chart, and a 'Download data (CSV)' button like the health dashboard."""
+    with st.container(border=True):
+        st.markdown(f'<div class="ct">{html.escape(title)}</div><div class="cs">{html.escape(sub)}</div>', unsafe_allow_html=True)
+        yield
+        if data is not None and len(data):
+            st.download_button("Download data (CSV)", data.to_csv(index=False).encode("utf-8"), f"{norm(title) or 'data'}_{date.today()}.csv",
+                               mime="text/csv", key=f"csv_{key}")
 
 
 # ---------- dashboard data ----------
@@ -2968,6 +3113,92 @@ def dash_recent(exp, fnd, mv, mr):
 
 
 # ---------- CEO dashboard ----------
+DASH_CSS = """
+<style>
+.dh{font-size:30px;font-weight:800;color:#0f2a1d;letter-spacing:.2px;margin:0 0 2px 0}
+.dsub{color:#6b7a70;font-size:14px;margin-bottom:10px}
+.dsec{font-size:13px;font-weight:800;letter-spacing:1px;color:#0b6a35;text-transform:uppercase;margin:22px 0 2px 0}
+.dcap{color:#6b7a70;font-size:13px;margin:0 0 10px 0}
+.kgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:14px;margin:6px 0 4px 0}
+.kc{background:#eef7f1;border-radius:14px;border-top:5px solid #1b8a4b;padding:14px 14px 12px 14px;box-shadow:0 1px 4px rgba(0,0,0,.06);text-align:center;min-height:150px}
+.kc.amber{background:#fff6e3;border-top-color:#e0922f}.kc.red{background:#fdecea;border-top-color:#c9453b}
+.kc.blue{background:#eaf2fb;border-top-color:#2f6fb0}.kc.grey{background:#f4f5f4;border-top-color:#8a948d}
+.kl{font-size:12.5px;font-weight:700;letter-spacing:.6px;color:#33423a;text-transform:uppercase}
+.kv{font-size:30px;font-weight:800;color:#0f2a1d;line-height:1.15;margin:6px 0 2px 0;word-break:break-word}
+.kv.sm{font-size:19px;line-height:1.3;margin:10px 0 6px 0}
+.kc.red .kv{color:#a52a20}
+.kd{font-size:12.5px;color:#5c6b62;margin-top:4px;line-height:1.3}
+.kx{font-size:12.5px;font-weight:700;margin-top:2px}.kx.up{color:#c06a00}.kx.down{color:#1b8a4b}.kx.same{color:#2f6fb0}
+.spark{display:block;margin:2px auto 0 auto}
+.ins{background:#fff;border:1px solid #e3e8e5;border-radius:14px;padding:14px 18px;margin:4px 0 8px 0}
+.ins .ir{display:flex;gap:12px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #eef1ef;font-size:15px;color:#1d2b22}
+.ins .ir:last-child{border-bottom:none}.ins .d{flex:0 0 12px;height:12px;border-radius:50%;margin-top:6px}
+.ct{font-size:17px;font-weight:800;color:#0f2a1d}.cs{font-size:13px;color:#6b7a70;margin:0 0 8px 0}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;justify-content:center;margin-top:4px}
+.lg{display:flex;align-items:center;gap:6px;font-size:13px;color:#1d2b22}
+.lg .dot{width:11px;height:11px;border-radius:50%;display:inline-block}.lg .lv{color:#6b7a70}
+</style>
+"""
+
+
+def spark_svg(values, labels, color="#1b8a4b"):
+    """Tiny line with month names under it, like the cards of the health dashboard."""
+    vals = [float(v) for v in values][-6:]
+    labs = list(labels)[-6:]
+    if len(vals) < 2:
+        return ""
+    w, h, pad = 170, 46, 14
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 1.0
+    xs = [pad + i * (w - 2 * pad) / (len(vals) - 1) for i in range(len(vals))]
+    ys = [8 + (1 - (v - lo) / span) * (h - 22) for v in vals]
+    pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+    dots = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>' for x, y in zip(xs, ys))
+    txt = "".join(f'<text x="{x:.1f}" y="{h + 6}" font-size="9.5" fill="#6b7a70" text-anchor="middle">{html.escape(str(l))}</text>' for x, l in zip(xs, labs))
+    return (f'<svg class="spark" width="{w}" height="{h + 10}" viewBox="0 0 {w} {h + 10}"><polyline points="{pts}" fill="none" stroke="{color}" '
+            f'stroke-width="2.2"/>{dots}{txt}</svg>')
+
+
+def kpi(label, value, desc, tone="", spark="", delta=None, small=False):
+    d = ""
+    if delta:
+        d = f'<div class="kx {delta[0]}">{html.escape(delta[1])}</div>'
+    return (f'<div class="kc {tone}"><div class="kl">{html.escape(label)}</div><div class="kv{" sm" if small else ""}">{html.escape(str(value))}</div>'
+            f'{spark}{d}<div class="kd">{html.escape(desc)}</div></div>')
+
+
+def kpi_grid(cards):
+    st.markdown(f'<div class="kgrid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
+def trend(cur, prev, prev_label, fmt=money):
+    """('up'|'down'|'same', '▲ 12% vs Oct (1,200)') - or None when there is nothing to compare with."""
+    if prev is None or prev <= 0:
+        return None
+    pct = (cur - prev) / prev * 100
+    if abs(pct) < 0.5:
+        return ("same", f"■ Same as {prev_label} ({fmt(prev)})")
+    return ("up" if pct > 0 else "down", f"{'▲' if pct > 0 else '▼'} {abs(pct):.0f}% vs {prev_label} ({fmt(prev)})")
+
+
+def monthly_vals(frame, col, months, how="sum"):
+    if frame is None or frame.empty:
+        return [0.0] * len(months)
+    g = frame.assign(M=frame.Date.astype(str).str[:7]).groupby("M")[col]
+    s = g.sum() if how == "sum" else g.size()
+    return [float(s.get(m, 0.0)) for m in months]
+
+
+def insights_html(rows):
+    if not rows:
+        rows = [("#1b8a4b", "Nothing needs your attention right now.")]
+    inner = "".join(f'<div class="ir"><span class="d" style="background:{c}"></span><div>{t}</div></div>' for c, t in rows)
+    st.markdown(f'<div class="ins">{inner}</div>', unsafe_allow_html=True)
+
+
+RED, AMBER, GREEN = "#c9453b", "#e0922f", "#1b8a4b"
+
+
 def ceo_dashboard():
     user, field = st.session_state.user, st.session_state.get("ceo_field", "All fields")
     sites = visible_sites()
@@ -2979,257 +3210,381 @@ def ceo_dashboard():
     if field != "All fields":
         mr, led = mr[mr.Field == field], led[led.Field == field]
     mr, led = mr.reset_index(drop=True), led.reset_index(drop=True)
-    debts, taxes, cats = load_debts(field), load_taxes(field), categories_df().name.tolist()
+    debts, taxes = load_debts(field), load_taxes(field)
     bal = stock_balances(mv)
+    cats_all = categories_df().name.tolist()
 
-    st.markdown(f"#### Good day, {user}")
-    st.caption(f"{date.today():%A, %d %B %Y} · {'All fields' if field == 'All fields' else field} · all amounts in Frw")
+    st.markdown(DASH_CSS, unsafe_allow_html=True)
+    st.markdown(f'<div class="dh">Financial dashboard</div><div class="dsub">{html.escape("All fields" if field == "All fields" else field)}'
+                f' · all amounts in Frw · updates automatically when anything is recorded</div>', unsafe_allow_html=True)
 
-    f1, f2, f3 = st.columns([2, 1.5, 1.5])
-    cat = f1.selectbox("Category", ["All categories"] + cats, key=f"cd_cat_{field}")
-    lo = date.fromisoformat(exp.Date.min()) if len(exp) else date.today()
-    hi = max(date.fromisoformat(exp.Date.max()), date.today()) if len(exp) else date.today()
-    d_from = f2.date_input("From", lo, key=f"cd_from_{field}")
-    d_to = f3.date_input("To", hi, key=f"cd_to_{field}")
-    sel = exp[(exp.Date >= str(d_from)) & (exp.Date <= str(d_to))]
-    if cat != "All categories":
-        sel = sel[sel.Category == cat]
+    # ---- filters (the same four as the Excel dashboard) ----
+    if len(exp):
+        first, last = exp.Date.min()[:7], max(exp.Date.max()[:7], str(date.today())[:7])
+        months, cur = [], date.fromisoformat(first + "-01")
+        while str(cur)[:7] <= last:
+            months.append(str(cur)[:7])
+            cur = date(cur.year + (cur.month == 12), cur.month % 12 + 1, 1)
+    else:
+        months = [str(date.today())[:7]]
+    labels = [month_label(m) for m in months]
+    options = ["All categories"] + cats_all
+    saved = st.session_state.get("dash_cat", "All categories")
+    saved = saved if saved in options else "All categories"
+    f1, f2, f3, f4 = st.columns([2.4, 1.3, 1.3, 1.5])
+    cat = f1.selectbox("Category", options, index=options.index(saved))
+    st.session_state.dash_cat = cat
+    a = f2.selectbox("From month", labels, index=0)
+    b = f3.selectbox("To month", labels, index=len(labels) - 1)
+    show = f4.selectbox("Show", ["Amount (Frw)", "Transactions"])
+    by_count = show == "Transactions"
+    i0, i1 = sorted([labels.index(a), labels.index(b)])
+    period = months[i0:i1 + 1]
+    inp = exp[(exp.Date.str[:7] >= period[0]) & (exp.Date.str[:7] <= period[-1])]
+    sel = inp if cat == "All categories" else inp[inp.Category == cat]
+    st.markdown(f'<div class="dcap">Showing: <b>{html.escape(cat if cat != "All categories" else "All categories")}</b> | '
+                f'{labels[i0]} to {labels[i1]}</div>', unsafe_allow_html=True)
 
+    # ---- numbers ----
     spent_all, funds_all = float(exp.Total.sum()), float(fnd.Amount.sum())
+    sel_total, sel_n = float(sel.Total.sum()), len(sel)
+    mon_sum, mon_cnt = monthly_vals(sel, "Total", period), monthly_vals(sel, "Total", period, "count")
+    mon_lab = [month_label(m, False) for m in period]
+    prev_lab = month_label(period[-2], False) if len(period) > 1 else ""
+    by_cat_period = inp.groupby("Category").Total.sum().sort_values(ascending=False)
+    top_cat = by_cat_period.index[0] if len(by_cat_period) else "-"
+    big = sel.loc[sel.Total.idxmax()] if sel_n else None
+
+    st.markdown('<div class="dsec">Selected category and period</div><div class="dcap">Changes with the filters above</div>', unsafe_allow_html=True)
+    kpi_grid([
+        kpi("Total spend", money(sel_total), "Frw spent in the selection", "green", spark_svg(mon_sum, mon_lab),
+            trend(mon_sum[-1], mon_sum[-2], prev_lab) if len(mon_sum) > 1 else None),
+        kpi("Transactions", f"{sel_n:,}", "entries recorded", "blue", spark_svg(mon_cnt, mon_lab, "#2f6fb0"),
+            trend(mon_cnt[-1], mon_cnt[-2], prev_lab, lambda v: f"{v:,.0f}") if len(mon_cnt) > 1 else None),
+        kpi("Average per transaction", money(sel_total / sel_n) if sel_n else "0", "Frw for one entry", "green"),
+        kpi("Largest transaction", money(big.Total) if big is not None else "0",
+            ("Frw · " + str(big.Item)[:34]) if big is not None else "Frw", "amber"),
+        kpi("Share of project spend", f"{sel_total / spent_all * 100:.1f}%" if spent_all else "0%", "of all recorded cost", "grey"),
+        kpi("Top category in period", top_cat, f"by amount · {money(by_cat_period.iloc[0])} Frw" if len(by_cat_period) else "by amount", "grey", small=True),
+    ])
+
+    st.markdown('<div class="dsec">Whole project</div><div class="dcap">Not affected by the filters</div>', unsafe_allow_html=True)
+    balance = funds_all - spent_all
+    used_pct = spent_all / funds_all * 100 if funds_all else None
+    big_cat = exp.groupby("Category").Total.sum().sort_values(ascending=False)
+    kpi_grid([
+        kpi("Funds received", money(funds_all), "recorded in Funds received", "green"),
+        kpi("Recorded expenditure", money(spent_all), f"all {exp.Category.nunique()} categories used", "amber"),
+        kpi("Balance / (shortfall)", ("-" if balance < 0 else "") + money(abs(balance)), "funds − expenditure", "red" if balance < 0 else "green"),
+        kpi("Funds used", f"{used_pct:.1f}%" if used_pct is not None else "no funds", "expenditure ÷ funds",
+            "red" if (used_pct or 0) >= 100 else "amber" if (used_pct or 0) >= 90 else "green"),
+        kpi("Biggest cost category", big_cat.index[0] if len(big_cat) else "-", f"all time · {money(big_cat.iloc[0])} Frw" if len(big_cat) else "all time", "grey", small=True),
+        kpi("Last transaction", exp.Date.max() if len(exp) else "-", "latest date recorded", "grey"),
+    ])
+
+    pend_mat = int(reqs[reqs.Status == "Pending"].batch.nunique()) if len(reqs) else 0
+    pend_money = int((mr.Status == "Pending").sum()) if len(mr) else 0
+    out_n = int((bal.Balance <= 1e-9).sum()) if len(bal) else 0
+    biz = float(led[led.Kind == "Business"].Amount.sum()) if len(led) else 0.0
+    we_owe = float(debts[debts.Direction == "We owe"].Balance.sum()) if len(debts) else 0.0
+    owed_us = float(debts[debts.Direction == "Owed to us"].Balance.sum()) if len(debts) else 0.0
     budgeted = sites[sites.budget.fillna(0) > 0]
     budget = float(budgeted.budget.sum())
     spent_budgeted = float(exp[exp.site_id.isin(budgeted.id)].Total.sum())
-    balance = funds_all - spent_all
-    pend_mat = int(reqs[reqs.Status == "Pending"].batch.nunique()) if len(reqs) else 0
-    pend_money = int((mr.Status == "Pending").sum()) if len(mr) else 0
+    bpct = spent_budgeted / budget * 100 if budget else None
+    st.markdown('<div class="dsec">Operations</div><div class="dcap">Approvals, stock, money and budget</div>', unsafe_allow_html=True)
+    kpi_grid([
+        kpi("Waiting for approval", pend_mat + pend_money, f"{pend_mat} material · {pend_money} money requests", "amber" if pend_mat + pend_money else "green"),
+        kpi("Materials out of stock", out_n, "material lines with no balance", "red" if out_n else "green"),
+        kpi("Money used (business)", money(biz), "Frw recorded in Money used", "blue"),
+        kpi("We owe (open)", money(we_owe), "unpaid debts", "amber" if we_owe else "green"),
+        kpi("Owed to us (open)", money(owed_us), "money others must pay us", "blue"),
+        kpi("Budget used", f"{bpct:.1f}%" if bpct is not None else "no budget", "of the budget set for the field" if bpct is not None else "set it in Fields & categories",
+            "red" if (bpct or 0) >= 100 else "amber" if (bpct or 0) >= 90 else "green"),
+    ])
 
-    k = st.columns(5)
-    k[0].metric("Total spend (selection)", money(sel.Total.sum()))
-    k[1].metric("Funds received", money(funds_all))
-    k[2].metric("Balance / (shortfall)", ("-" if balance < 0 else "") + money(abs(balance)))
-    k[3].metric("Budget used", f"{spent_budgeted / budget * 100:.1f}%" if budget else "no budget")
-    k[4].metric("Transactions", len(sel))
-    k = st.columns(5)
-    k[0].metric("Waiting for approval", pend_mat + pend_money)
-    k[1].metric("Materials out of stock", int((bal.Balance <= 1e-9).sum()) if len(bal) else 0)
-    k[2].metric("Money used (business)", money(led[led.Kind == "Business"].Amount.sum()) if len(led) else "0")
-    k[3].metric("We owe (open)", money(debts[debts.Direction == "We owe"].Balance.sum()) if len(debts) else "0")
-    k[4].metric("Owed to us (open)", money(debts[debts.Direction == "Owed to us"].Balance.sum()) if len(debts) else "0")
+    # ---- what the data says ----
+    says = []
+    if len(by_cat_period) and by_cat_period.sum() > 0:
+        share = by_cat_period.iloc[0] / by_cat_period.sum() * 100
+        says.append((AMBER if share >= 50 else GREEN, f"<b>Biggest cost:</b> {html.escape(str(top_cat))} is {share:.0f}% of the spending in this period ({money(by_cat_period.iloc[0])} Frw)."))
+    if len(period) > 1 and mon_sum[-2] > 0:
+        pc = (mon_sum[-1] - mon_sum[-2]) / mon_sum[-2] * 100
+        says.append((AMBER if pc > 25 else GREEN, f"<b>Spending:</b> {month_label(period[-1])} is {abs(pc):.0f}% {'higher' if pc > 0 else 'lower'} than {month_label(period[-2])} ({money(mon_sum[-1])} against {money(mon_sum[-2])} Frw)."))
+    if funds_all:
+        says.append((RED, f"<b>Funds:</b> spending is {money(-balance)} Frw more than the funds received.") if balance < 0
+                    else (GREEN, f"<b>Funds:</b> {money(balance)} Frw of the funds received is still available ({100 - used_pct:.0f}%)."))
+    for lvl, text in dash_alerts(sites, exp, fnd, bal, mr, reqs, debts)[:6]:
+        if text.startswith(tuple(s.name for s in sites.itertuples())) and "funds received" in text:
+            continue  # already said above
+        says.append((RED if lvl == "High" else AMBER if lvl == "Medium" else "#2f6fb0", html.escape(text)))
+    st.markdown('<div class="dsec">What the data says</div>', unsafe_allow_html=True)
+    insights_html(says[:8])
 
-    t_over, t_fin, t_mat, t_time, t_money = st.tabs(["Overview", "Financial", "Materials", "Time spent", "Money, taxes & debts"])
+    # ---- charts ----
+    st.markdown('<div class="dsec">Analysis</div><div class="dcap">Hover a chart for the exact value. Click a bar in the category ranking to filter the whole page. '
+                'Every chart has a Download data button.</div>', unsafe_allow_html=True)
+    t_sp, t_fin, t_mat, t_time, t_money, t_act = st.tabs(["Spending", "Financial", "Materials", "Time spent", "Money, taxes & debts", "Activity"])
+    metric = "Transactions" if by_count else "Amount"
+    unit = "entries" if by_count else "Frw"
 
-    with t_over:
-        a, b, c = st.columns([1, 1.4, 1.2])
-        with a:
-            st.markdown("**Budget utilization**")
-            if budget:
-                pct = spent_budgeted / budget * 100
-                c_donut(pd.DataFrame({"Part": ["Spent", "Remaining"], "Frw": [spent_budgeted, max(budget - spent_budgeted, 0)]}),
-                        "Part", "Frw", center=f"{pct:.0f}%")
-            elif funds_all:
-                c_donut(pd.DataFrame({"Part": ["Spent", "Balance"], "Frw": [min(spent_all, funds_all), max(funds_all - spent_all, 0)]}),
-                        "Part", "Frw", center=f"{spent_all / funds_all * 100:.0f}%")
-                st.caption("No budget is set, so this shows the funds used.")
-            else:
-                st.caption("Set a budget in Fields & categories, or record funds, to see this chart.")
-        with b:
-            st.markdown("**Spending and funds, cumulative by month**")
-            m = pd.concat({"Spent": month_series(exp, "Date", "Total"), "Funds received": month_series(fnd, "Date", "Amount")}, axis=1)
-            if len(m):
-                m = m.fillna(0).sort_index().cumsum().reset_index().rename(columns={"index": "Month", "M": "Month"})
-                c_lines(m, "Month", [c for c in ["Spent", "Funds received"] if c in m.columns])
-            else:
-                st.caption("Nothing to show yet.")
-        with c:
-            if field == "All fields" and len(sites) > 1:
-                st.markdown("**Field performance (budget used %, or spend)**")
-                per = sites[["id", "name", "budget"]].copy()
-                per["Spent"] = per.id.map(exp.groupby("site_id").Total.sum()).fillna(0)
-                per["Used"] = [s / b * 100 if b else None for s, b in zip(per.Spent, per.budget.fillna(0))]
-                if per.Used.notna().any():
-                    c_bar(per[per.Used.notna()].rename(columns={"name": "Field"})[["Field", "Used"]].round(1), "Field", "Used", fmt=".1f")
+    with t_sp:
+        rank = inp.groupby("Category", as_index=False).agg(Amount=("Total", "sum"), Transactions=("Total", "size"))
+        rank["Value"] = rank["Transactions" if by_count else "Amount"]
+        rank = rank.sort_values("Value", ascending=False).reset_index(drop=True)
+        rank["Share %"] = (rank.Value / max(rank.Value.sum(), 1e-9) * 100).round(1)
+        c1, c2 = st.columns(2)
+        with c1:
+            with card("Category ranking", f"{labels[i0]} to {labels[i1]} · ranked by {metric.lower()} · click a bar to select it", rank[["Category", "Amount", "Transactions", "Share %"]], "rank"):
+                if rank.empty:
+                    st.caption("No spending in this period.")
                 else:
-                    c_bar(per.rename(columns={"name": "Field"})[["Field", "Spent"]], "Field", "Spent")
-            else:
-                st.markdown("**Spending by category**")
-                c_bar(sel.groupby("Category", as_index=False).Total.sum().sort_values("Total", ascending=False).head(8), "Category", "Total")
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Category share of the spending**")
-            c_donut(top_other(sel, "Category", "Total"), "Category", "Total") if len(sel) else st.caption("No spending in this selection.")
-        with b:
-            st.markdown("**Category ranking (top 10)**")
-            c_bar(sel.groupby("Category", as_index=False).Total.sum().sort_values("Total", ascending=False).head(10), "Category", "Total")
-        a, b, c = st.columns([1.3, 1, 1])
-        with a:
-            st.markdown("**Recent updates**")
-            rec = dash_recent(exp, fnd, mv, mr)
-            wide(st.dataframe, pretty(rec, ["Amount"]), hide_index=True) if len(rec) else st.caption("Nothing recorded yet.")
-        with b:
-            st.markdown("**Critical issue alerts**")
-            alerts = dash_alerts(sites, exp, fnd, bal, mr, reqs, debts)
-            if not alerts:
-                st.success("No alerts.")
-            for lvl, text in sorted(alerts, key=lambda x: ["High", "Medium", "Low"].index(x[0]))[:8]:
-                st.markdown(f"**:{'red' if lvl == 'High' else 'orange' if lvl == 'Medium' else 'blue'}[{lvl}]** {text}")
-        with c:
-            st.markdown("**Upcoming deadlines (30 days)**")
-            dl = dash_deadlines(mr, reqs, debts)
-            wide(st.dataframe, dl, hide_index=True) if len(dl) else st.caption("Nothing due soon.")
+                    clicked = c_bar(rank.rename(columns={"Value": "Value"})[["Category", "Value"]], "Category", "Value", highlight=cat if cat != "All categories" else None,
+                                    unit=unit, key="dash_rank", select=True)
+                    last = st.session_state.get("dash_last_click")
+                    if clicked != last:
+                        st.session_state.dash_last_click = clicked
+                        st.session_state.dash_cat = clicked if clicked else "All categories"
+                        st.rerun()
+        with c2:
+            with card("Share of spending", f"Category share of the {metric.lower()} in the period", rank[["Category", "Value", "Share %"]], "share"):
+                c_donut(top_other(rank.rename(columns={"Value": "V"}), "Category", "V", 7), "Category", "V",
+                        center=short(rank.Value.sum()) if len(rank) else None)
+        c1, c2 = st.columns(2)
+        with c1:
+            ms = pd.DataFrame({"Month": [month_label(m) for m in period], "Value": mon_cnt if by_count else mon_sum})
+            with card(f"{metric} by month", f"{cat if cat != 'All categories' else 'All categories'} · {labels[i0]} to {labels[i1]}", ms, "bymonth"):
+                c_bar(ms, "Month", "Value", horizontal=False, unit=unit, xtitle="Month")
+        with c2:
+            cm = pd.concat({"Spent (cumulative)": month_series(exp, "Date", "Total"), "Funds received": month_series(fnd, "Date", "Amount")}, axis=1)
+            if len(cm):
+                cm = cm.fillna(0).sort_index().cumsum().reset_index()
+                cm.columns = ["Month"] + list(cm.columns[1:])
+                cm["Month"] = [month_label(m) for m in cm.Month]
+            with card("Cumulative spend vs funds received", "Whole project · when the spending line passes the funds line, money is short", cm if len(cm) else None, "cum"):
+                if len(cm):
+                    c_lines(cm, "Month", [c for c in ["Spent (cumulative)", "Funds received"] if c in cm.columns])
+                else:
+                    st.caption("Nothing to show yet.")
+        with card("Category ranking table", f"{labels[i0]} to {labels[i1]}", None, "ranktbl"):
+            tbl = rank[["Category", "Amount", "Transactions", "Share %"]].copy()
+            tbl.insert(0, "Rank", range(1, len(tbl) + 1))
+            wide(st.dataframe, pretty(tbl, ["Amount"]), hide_index=True)
+            if len(tbl):
+                st.download_button("Download data (CSV)", tbl.to_csv(index=False).encode("utf-8"), f"category_ranking_{date.today()}.csv", mime="text/csv", key="csv_ranktbl")
 
     with t_fin:
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Spent and funds received by month**")
+        c1, c2 = st.columns(2)
+        with c1:
             m = pd.concat({"Spent": month_series(exp, "Date", "Total"), "Funds received": month_series(fnd, "Date", "Amount")}, axis=1)
+            m = m.fillna(0).sort_index().tail(12).reset_index() if len(m) else m
             if len(m):
-                c_grouped(m.fillna(0).sort_index().tail(12).reset_index().rename(columns={"index": "Month", "M": "Month"}), "Month",
-                          [c for c in ["Spent", "Funds received"] if c in m.columns])
-            else:
-                st.caption("Nothing to show yet.")
-        with b:
-            st.markdown("**Cumulative spending**")
-            ms = month_series(exp, "Date", "Total")
-            if len(ms):
-                c_lines(ms.sort_index().cumsum().rename("Spent (cumulative)").reset_index().rename(columns={"M": "Month"}), "Month",
-                        ["Spent (cumulative)"], area=True)
-            else:
-                st.caption("Nothing to show yet.")
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Spending by category and month (stacked)**")
+                m.columns = ["Month"] + list(m.columns[1:])
+                m["Month"] = [month_label(x) for x in m.Month]
+            with card("Spent and funds received by month", "Last 12 months · whole project", m if len(m) else None, "spf"):
+                if len(m):
+                    c_grouped(m, "Month", [c for c in ["Spent", "Funds received"] if c in m.columns])
+                else:
+                    st.caption("Nothing to show yet.")
+        with c2:
+            stk = pd.DataFrame()
             if len(sel):
-                top = top_other(sel, "Category", "Total", 5).Category.tolist()
-                s2 = sel.assign(Month=sel.Date.str[:7], Cat=sel.Category.where(sel.Category.isin(top), "Other"))
-                piv = s2.pivot_table(index="Month", columns="Cat", values="Total", aggfunc="sum", fill_value=0).sort_index().tail(12)
-                c_grouped(piv.reset_index(), "Month", list(piv.columns), stacked=True)
-            else:
-                st.caption("No spending in this selection.")
-        with b:
-            st.markdown("**Biggest items (top 10)**")
-            c_bar(sel.groupby("Item", as_index=False).Total.sum().sort_values("Total", ascending=False).head(10), "Item", "Total")
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Average transaction by category**")
-            c_bar(sel.groupby("Category", as_index=False).Total.mean().sort_values("Total", ascending=False).head(10), "Category", "Total")
-        with b:
-            if field == "All fields" and len(sites) > 1:
-                st.markdown("**Funds received and spent by field**")
-                per = sites[["id", "name"]].rename(columns={"name": "Field"}).copy()
-                per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0)
-                per["Spent"] = per.id.map(exp.groupby("site_id").Total.sum()).fillna(0)
-                c_grouped(per.sort_values("Spent", ascending=False).head(10), "Field", ["Funds received", "Spent"])
-            else:
-                st.markdown("**Transactions by category (number)**")
-                c_bar(sel.groupby("Category", as_index=False).size().rename(columns={"size": "Number"}).sort_values("Number", ascending=False).head(10),
-                      "Category", "Number", fmt=",.0f")
+                topc = top_other(sel, "Category", "Total", 5).Category.tolist()
+                s2 = sel.assign(Month=sel.Date.str[:7], Cat=sel.Category.where(sel.Category.isin(topc), "Other"))
+                stk = s2.pivot_table(index="Month", columns="Cat", values="Total", aggfunc="sum", fill_value=0).sort_index().tail(12)
+                stk.index = [month_label(x) for x in stk.index]
+                stk = stk.reset_index().rename(columns={"index": "Month"})
+            with card("Spending by category and month", "Stacked · top 5 categories, the rest together as Other", stk if len(stk) else None, "stk"):
+                if len(stk):
+                    c_grouped(stk, "Month", [c for c in stk.columns if c != "Month"], stacked=True)
+                else:
+                    st.caption("No spending in this selection.")
+        c1, c2 = st.columns(2)
+        with c1:
+            items = sel.groupby("Item", as_index=False).Total.sum().sort_values("Total", ascending=False).head(10)
+            with card("Biggest items", "Top 10 items by amount in the selection", items, "items"):
+                c_bar(items, "Item", "Total", unit="Frw")
+        with c2:
+            avg = sel.groupby("Category", as_index=False).Total.mean().sort_values("Total", ascending=False).head(10)
+            avg["Total"] = avg.Total.round(0)
+            with card("Average transaction by category", "Frw for one entry · top 10", avg, "avg"):
+                c_bar(avg, "Category", "Total", unit="Frw", color="#2f6fb0")
+        if field == "All fields" and len(sites) > 1:
+            per = sites[["id", "name", "budget"]].rename(columns={"name": "Field"}).copy()
+            per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0)
+            per["Spent"] = per.id.map(exp.groupby("site_id").Total.sum()).fillna(0)
+            per = per.sort_values("Spent", ascending=False).head(10)
+            with card("Funds received and spent by field", "Compare the fields side by side", per[["Field", "Funds received", "Spent"]], "perfield"):
+                c_grouped(per, "Field", ["Funds received", "Spent"])
 
     with t_mat:
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Stock status (material lines)**")
+        c1, c2 = st.columns(2)
+        with c1:
+            stat = pd.DataFrame({"Status": ["In stock", "Out of stock"], "Lines": [int((bal.Balance > 1e-9).sum()), int((bal.Balance <= 1e-9).sum())]}) if len(bal) else pd.DataFrame()
+            with card("Stock status", "Material lines with and without balance", stat if len(stat) else None, "stat"):
+                if len(stat):
+                    c_donut(stat, "Status", "Lines", colors=["#0b6a35", "#c9453b"])
+                else:
+                    st.caption("No materials recorded yet.")
+        with c2:
+            top = pd.DataFrame()
             if len(bal):
-                c_donut(pd.DataFrame({"Status": ["In stock", "Out of stock"], "Lines": [int((bal.Balance > 1e-9).sum()), int((bal.Balance <= 1e-9).sum())]}),
-                        "Status", "Lines")
-            else:
-                st.caption("No materials recorded yet.")
-        with b:
-            st.markdown("**Largest stock balances**")
+                top = bal[bal.Balance > 1e-9].assign(Item=lambda d: d.Material + " (" + d.Unit.fillna("") + ")").sort_values("Balance", ascending=False).head(10)[["Item", "Balance"]]
+            with card("Largest stock balances", "Top 10 materials in stock", top if len(top) else None, "topstock"):
+                if len(top):
+                    c_bar(top, "Item", "Balance", unit="Quantity")
+                else:
+                    st.caption("Nothing to show yet.")
+        c1, c2 = st.columns(2)
+        with c1:
+            rcv = pd.DataFrame()
+            if len(mv):
+                by = mv[mv.Type.isin(["Received", "Used"])].assign(Month=lambda d: d.Date.astype(str).str[:7])
+                if len(by):
+                    rcv = by.groupby(["Month", "Type"]).size().unstack(fill_value=0).reindex(columns=["Received", "Used"], fill_value=0).sort_index().tail(12)
+                    rcv.index = [month_label(x) for x in rcv.index]
+                    rcv = rcv.reset_index().rename(columns={"index": "Month"})
+            with card("Materials received and used", "Number of movements by month", rcv if len(rcv) else None, "rcv"):
+                if len(rcv):
+                    c_grouped(rcv, "Month", ["Received", "Used"], ytitle="Movements")
+                else:
+                    st.caption("Nothing to show yet.")
+        with c2:
+            rs = reqs.groupby("Status", as_index=False).size().rename(columns={"size": "Lines"}) if len(reqs) else pd.DataFrame()
+            with card("Material requests by status", "All requests sent by the field managers", rs if len(rs) else None, "reqst"):
+                if len(rs):
+                    c_donut(rs, "Status", "Lines")
+                else:
+                    st.caption("No material requests yet.")
+        c1, c2 = st.columns(2)
+        with c1:
+            mr_top = reqs.groupby("Material", as_index=False).Requested.sum().sort_values("Requested", ascending=False).head(10) if len(reqs) else pd.DataFrame()
+            with card("Most requested materials", "Total quantity requested · top 10", mr_top if len(mr_top) else None, "mreq"):
+                if len(mr_top):
+                    c_bar(mr_top, "Material", "Requested", unit="Quantity", color="#2f6fb0")
+                else:
+                    st.caption("No material requests yet.")
+        with c2:
+            bycat = pd.DataFrame()
             if len(bal):
-                top = bal[bal.Balance > 1e-9].assign(Item=lambda d: d.Material + " (" + d.Unit.fillna("") + ")").sort_values("Balance", ascending=False).head(10)
-                c_bar(top[["Item", "Balance"]], "Item", "Balance", fmt=",.2f")
-            else:
-                st.caption("Nothing to show yet.")
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Received and used by month (number of lines)**")
-            by = mv[mv.Type.isin(["Received", "Used"])].assign(Month=lambda d: d.Date.astype(str).str[:7]) if len(mv) else mv
-            if len(by):
-                piv = by.groupby(["Month", "Type"]).size().unstack(fill_value=0).reindex(columns=["Received", "Used"], fill_value=0).sort_index().tail(12)
-                c_grouped(piv.reset_index(), "Month", ["Received", "Used"])
-            else:
-                st.caption("Nothing to show yet.")
-        with b:
-            st.markdown("**Material requests by status**")
-            if len(reqs):
-                c_donut(reqs.groupby("Status", as_index=False).size().rename(columns={"size": "Lines"}), "Status", "Lines")
-            else:
-                st.caption("No material requests yet.")
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Most requested materials**")
-            if len(reqs):
-                c_bar(reqs.groupby("Material", as_index=False).Requested.sum().sort_values("Requested", ascending=False).head(10), "Material", "Requested", fmt=",.2f")
-            else:
-                st.caption("No material requests yet.")
-        with b:
-            st.markdown("**Material lines in stock, by category**")
-            mats = df("SELECT id, COALESCE(category, 'Uncategorised') AS category FROM materials")
-            if len(bal):
+                mats = df("SELECT id, COALESCE(category, 'Uncategorised') AS category FROM materials")
                 inst = bal[bal.Balance > 1e-9].assign(Category=lambda d: d.material_id.map(dict(zip(mats.id, mats.category))).fillna("Uncategorised"))
-                c_bar(inst.groupby("Category", as_index=False).size().rename(columns={"size": "Lines"}).sort_values("Lines", ascending=False), "Category", "Lines", fmt=",.0f")
-            else:
-                st.caption("Nothing to show yet.")
+                bycat = inst.groupby("Category", as_index=False).size().rename(columns={"size": "Lines"}).sort_values("Lines", ascending=False)
+            with card("Materials in stock by category", "Number of material lines", bycat if len(bycat) else None, "matcat"):
+                if len(bycat):
+                    c_bar(bycat, "Category", "Lines", unit="Lines")
+                else:
+                    st.caption("Nothing to show yet.")
 
     with t_time:
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Spending by month**")
-            ms = month_series(sel, "Date", "Total")
-            c_lines(ms.sort_index().tail(24).rename("Spent").reset_index().rename(columns={"M": "Month"}), "Month", ["Spent"], area=True) if len(ms) else st.caption("Nothing to show yet.")
-        with b:
-            st.markdown("**Spending by weekday**")
+        c1, c2 = st.columns(2)
+        with c1:
+            tm = pd.DataFrame({"Month": [month_label(m) for m in period], "Spent": mon_sum})
+            with card("Spending over time", f"Month by month · {labels[i0]} to {labels[i1]}", tm, "time"):
+                c_lines(tm, "Month", ["Spent"], area=True)
+        with c2:
+            wd = pd.DataFrame()
             if len(sel):
-                wd = pd.to_datetime(sel.Date, errors="coerce").dt.day_name()
                 order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-                g = sel.assign(Day=wd).groupby("Day").Total.sum().reindex(order).fillna(0).reset_index()
-                c_bar(g, "Day", "Total", horizontal=False)
-            else:
-                st.caption("Nothing to show yet.")
-        st.markdown("**Heat map: category by month**")
+                wd = sel.assign(Day=pd.to_datetime(sel.Date, errors="coerce").dt.day_name()).groupby("Day").Total.sum().reindex(order).fillna(0).reset_index()
+            with card("Spending by day of the week", "Which days the money goes out", wd if len(wd) else None, "wday"):
+                if len(wd):
+                    c_bar(wd, "Day", "Total", horizontal=False, unit="Frw")
+                else:
+                    st.caption("Nothing to show yet.")
+        hm = pd.DataFrame()
         if len(sel):
             hm = sel.assign(Month=sel.Date.str[:7]).groupby(["Month", "Category"], as_index=False).Total.sum().sort_values("Month")
-            c_heat(hm[hm.Month.isin(sorted(hm.Month.unique())[-12:])], "Month", "Category", "Total")
-        else:
-            st.caption("Nothing to show yet.")
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Number of transactions by month**")
-            cnt = sel.assign(Month=sel.Date.str[:7]).groupby("Month").size().sort_index().tail(12).rename("Transactions").reset_index() if len(sel) else sel
-            c_bar(cnt, "Month", "Transactions", fmt=",.0f", horizontal=False) if len(cnt) else st.caption("Nothing to show yet.")
-        with b:
-            st.markdown("**Days since the last entry, by field**")
-            if len(exp):
-                last = exp.groupby("Field").Date.max().reset_index()
-                last["Days"] = [(date.today() - date.fromisoformat(d)).days for d in last.Date]
-                c_bar(last[["Field", "Days"]], "Field", "Days", fmt=",.0f")
+            hm = hm[hm.Month.isin(sorted(hm.Month.unique())[-12:])]
+            hm["Month"] = [month_label(x) for x in hm.Month]
+        with card("Heat map: category by month", "Darker means more money", hm if len(hm) else None, "heat"):
+            if len(hm):
+                c_heat(hm, "Month", "Category", "Total")
             else:
                 st.caption("Nothing to show yet.")
+        c1, c2 = st.columns(2)
+        with c1:
+            cnt = pd.DataFrame({"Month": [month_label(m) for m in period], "Transactions": mon_cnt})
+            with card("Number of transactions by month", "How busy each month was", cnt, "cnt"):
+                c_bar(cnt, "Month", "Transactions", horizontal=False, unit="entries", color="#2f6fb0")
+        with c2:
+            lastd = pd.DataFrame()
+            if len(exp):
+                lastd = exp.groupby("Field").Date.max().reset_index()
+                lastd["Days"] = [(date.today() - date.fromisoformat(d)).days for d in lastd.Date]
+            with card("Days since the last entry", "By field · a high number means nobody is recording", lastd[["Field", "Days"]] if len(lastd) else None, "since"):
+                if len(lastd):
+                    c_bar(lastd[["Field", "Days"]], "Field", "Days", unit="Days", color="#8e5ea2")
+                else:
+                    st.caption("Nothing to show yet.")
 
     with t_money:
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Money used by category (business)**")
-            biz = led[led.Kind == "Business"] if len(led) else led
-            c_bar(biz.groupby("Category", as_index=False).Amount.sum().sort_values("Amount", ascending=False).head(10), "Category", "Amount") if len(biz) else st.caption("Nothing recorded yet.")
-        with b:
-            st.markdown("**Business and personal**")
-            c_donut(led.groupby("Kind", as_index=False).Amount.sum(), "Kind", "Amount") if len(led) else st.caption("Nothing recorded yet.")
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Money used by month**")
+        c1, c2 = st.columns(2)
+        bizl = led[led.Kind == "Business"] if len(led) else led
+        with c1:
+            mu = bizl.groupby("Category", as_index=False).Amount.sum().sort_values("Amount", ascending=False).head(10) if len(bizl) else pd.DataFrame()
+            with card("Money used by category", "Business spending · top 10", mu if len(mu) else None, "mu"):
+                if len(mu):
+                    c_bar(mu, "Category", "Amount", unit="Frw", color="#8e5ea2")
+                else:
+                    st.caption("Nothing recorded yet.")
+        with c2:
+            kd = led.groupby("Kind", as_index=False).Amount.sum() if len(led) else pd.DataFrame()
+            with card("Business and personal", "Split of the money used", kd if len(kd) else None, "kind"):
+                if len(kd):
+                    c_donut(kd, "Kind", "Amount", colors=["#0b6a35", "#e0922f"])
+                else:
+                    st.caption("Nothing recorded yet.")
+        c1, c2 = st.columns(2)
+        with c1:
             ml = month_series(led, "Date", "Amount")
-            c_lines(ml.sort_index().tail(12).rename("Money used").reset_index().rename(columns={"M": "Month"}), "Month", ["Money used"]) if len(ml) else st.caption("Nothing recorded yet.")
-        with b:
-            st.markdown("**Money requests by status**")
-            c_donut(mr.groupby("Status", as_index=False).size().rename(columns={"size": "Requests"}), "Status", "Requests") if len(mr) else st.caption("No money requests yet.")
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Taxes paid by type**")
-            c_bar(taxes.groupby("Tax", as_index=False).Amount.sum().sort_values("Amount", ascending=False), "Tax", "Amount") if len(taxes) else st.caption("No tax payments yet.")
-        with b:
-            st.markdown("**Open debts**")
-            c_donut(debts.groupby("Direction", as_index=False).Balance.sum(), "Direction", "Balance") if len(debts) else st.caption("No open debts.")
+            mdf = ml.sort_index().tail(12).rename("Money used").reset_index().rename(columns={"M": "Month"}) if len(ml) else pd.DataFrame()
+            if len(mdf):
+                mdf["Month"] = [month_label(x) for x in mdf.Month]
+            with card("Money used by month", "Last 12 months", mdf if len(mdf) else None, "mum"):
+                if len(mdf):
+                    c_lines(mdf, "Month", ["Money used"], area=True)
+                else:
+                    st.caption("Nothing recorded yet.")
+        with c2:
+            ms_ = mr.groupby("Status", as_index=False).size().rename(columns={"size": "Requests"}) if len(mr) else pd.DataFrame()
+            with card("Money requests by status", "Requests sent by the field managers", ms_ if len(ms_) else None, "mrs"):
+                if len(ms_):
+                    c_donut(ms_, "Status", "Requests")
+                else:
+                    st.caption("No money requests yet.")
+        c1, c2 = st.columns(2)
+        with c1:
+            tx = taxes.groupby("Tax", as_index=False).Amount.sum().sort_values("Amount", ascending=False) if len(taxes) else pd.DataFrame()
+            with card("Taxes paid by type", "All recorded tax payments", tx if len(tx) else None, "tax"):
+                if len(tx):
+                    c_bar(tx, "Tax", "Amount", unit="Frw", color="#2f6fb0")
+                else:
+                    st.caption("No tax payments yet.")
+        with c2:
+            db = debts.groupby("Direction", as_index=False).Balance.sum() if len(debts) else pd.DataFrame()
+            with card("Open debts", "What we owe and what is owed to us", db if len(db) else None, "debt"):
+                if len(db):
+                    c_donut(db, "Direction", "Balance", colors=["#c9453b", "#0b6a35"])
+                else:
+                    st.caption("No open debts.")
+
+    with t_act:
+        c1, c2 = st.columns(2)
+        with c1:
+            rec = dash_recent(exp, fnd, mv, mr)
+            with card("Recent updates", "The latest things recorded", rec if len(rec) else None, "recent"):
+                if len(rec):
+                    wide(st.dataframe, pretty(rec, ["Amount"]), hide_index=True)
+                else:
+                    st.caption("Nothing recorded yet.")
+        with c2:
+            dl = dash_deadlines(mr, reqs, debts)
+            with card("Upcoming deadlines", "Next 30 days · requests and debts", dl if len(dl) else None, "dead"):
+                if len(dl):
+                    wide(st.dataframe, dl, hide_index=True)
+                else:
+                    st.caption("Nothing due soon.")
 
 
 # ---------- CEO: material stock ----------
