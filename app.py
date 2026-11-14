@@ -860,15 +860,17 @@ def compare_bars(frame, label, a, b):
 
 
 def visible_sites():
-    """CEO and Accountant see every field. Store and Field managers only the fields given to them."""
+    """CEO sees every field. Everybody else only the fields given to them. On the new pages the Field drop-down at the
+    top narrows this to one field (ceo_scope is set by main)."""
     if has(*SEE_ALL):
         sites = df("SELECT * FROM sites ORDER BY name")
-        chosen = st.session_state.get("ceo_scope")  # set by main on the CEO data pages (the Field drop-down)
-        if chosen and chosen != "All fields":
-            sites = sites[sites.name == chosen].reset_index(drop=True)
-        return sites
-    return df("""SELECT s.* FROM sites s JOIN user_sites u ON u.site_id=s.id WHERE u.user_id=? ORDER BY s.name""",
-              (st.session_state.uid,))
+    else:
+        sites = df("""SELECT s.* FROM sites s JOIN user_sites u ON u.site_id=s.id WHERE u.user_id=? ORDER BY s.name""",
+                   (st.session_state.uid,))
+    chosen = st.session_state.get("ceo_scope")
+    if chosen and chosen != "All fields":
+        sites = sites[sites.name == chosen].reset_index(drop=True)
+    return sites
 
 
 def categories_df():
@@ -1305,8 +1307,12 @@ def recent_moves(site_id, kind, key):
     q = search_box(key, "Search material or note", "Type part of a name…")
     mv = load_moves([site_id])
     mv = match(mv[mv.Type == kind], ["Material", "Detail", "Entered by"], q).head(100)
-    wide(st.dataframe, pretty(mv.assign(Qty=mv.Qty.abs())[["Date", "Material", "Unit", "Qty", "Detail", "Entered by"]],
-                              qty_cols=["Qty"]), hide_index=True)
+    shown = mv.assign(Qty=mv.Qty.abs())[["Date", "Material", "Unit", "Qty", "Detail", "Entered by"]].reset_index(drop=True)
+    shown.insert(0, "No", range(1, len(shown) + 1))
+    wide(st.dataframe, pretty(shown, qty_cols=["Qty"]), hide_index=True)
+    if len(shown):
+        st.download_button(":material/download: Download Excel", to_excel({kind: shown}), f"materials_{kind.lower()}_{date.today()}.xlsx",
+                           mime=XLSX, key=f"dl_{key}")
 
 
 def page_receive():
@@ -2086,7 +2092,8 @@ def page_taxdebt():
         view = match(taxes, ["Tax", "Period", "Reference", "Field"], q)
         st.caption(f"{len(view)} payments, total {money(view.Amount.sum())} Frw")
         bars(view.groupby("Tax", as_index=False).Amount.sum().sort_values("Amount", ascending=False), "Tax", "Amount")
-        wide(st.dataframe, pretty(view.head(300), ["Amount"]), hide_index=True)
+        sheet_show(view.assign(Item=view.Tax + " " + view.Period.fillna(""), Qty=1.0, **{"P/U": view.Amount, "Total": view.Amount}),
+                   ["Period", "Reference", "Field", "By"], "Taxes paid", "tx")
 
     st.subheader("Debts")
     st.caption("Money the company owes, or money others owe the company.")
@@ -2118,7 +2125,8 @@ def page_taxdebt():
     k = st.columns(2)
     k[0].metric("We owe (open)", money(view[(view.Direction == "We owe") & (view.Balance > 0)].Balance.sum()))
     k[1].metric("Owed to us (open)", money(view[(view.Direction == "Owed to us") & (view.Balance > 0)].Balance.sum()))
-    wide(st.dataframe, pretty(view.drop(columns="id"), ["Amount", "Paid", "Balance"], "Status"), hide_index=True)
+    sheet_show(view.assign(Date=view.Due, Item=view.Who, Qty=1.0, **{"P/U": view.Amount, "Total": view.Amount}),
+               ["Direction", "Paid", "Balance", "Status", "Field", "Note"], "Debts", "db")
     openr = debts[debts.Balance > 0]
     if len(openr):
         st.markdown("**Record a payment on a debt**")
@@ -2569,9 +2577,16 @@ NEW_CAT = "+ New category…"
 PALETTE = ["#0b6a35", "#e0922f", "#2f6fb0", "#8e5ea2", "#c9453b", "#3aa6a0", "#7c8b2c", "#b5527f", "#5c6b73", "#d4b21f"]
 
 
-def ceo_field_bar():
-    """The Field drop-down shown at the top of every CEO data page. The choice is remembered between pages."""
-    names = df("SELECT name FROM sites ORDER BY name")["name"].tolist()
+def field_bar():
+    """The Field drop-down at the top of every data page (All fields, then each field). A person with one field sees its name."""
+    st.session_state.ceo_scope = None
+    names = visible_sites().name.tolist()
+    if not names:
+        return "All fields"
+    if len(names) == 1 and not has(CEO):
+        st.markdown(f"**Field:** {names[0]}")
+        st.session_state.ceo_field = names[0]
+        return names[0]
     options = ["All fields"] + names
     saved = st.session_state.get("ceo_field", "All fields")
     if saved not in options:
@@ -3065,15 +3080,28 @@ def dash_alerts(sites, exp, fnd, bal, mr, reqs, debts):
     if len(out_stock):
         names = ", ".join(sorted(set(out_stock.Material))[:3])
         out.append(("Medium", f"{len(out_stock)} material line(s) out of stock ({names}{'…' if out_stock.Material.nunique() > 3 else ''})."))
-    pm = int(reqs[reqs.Status == "Pending"].batch.nunique()) if len(reqs) else 0
-    if pm:
-        out.append(("Medium", f"{pm} material request(s) waiting for approval."))
+    me = st.session_state.user
+    pend = reqs[reqs.Status == "Pending"] if len(reqs) else reqs
+    if has(CEO, ACCOUNTANT):
+        pm = int(pend[pend["Requested by"] != me].batch.nunique()) if len(pend) else 0
+        if pm:
+            out.append(("Medium", f"{pm} material request(s) waiting for approval."))
+    else:
+        pm = int(pend[pend["Requested by"] == me].batch.nunique()) if len(pend) else 0
+        if pm:
+            out.append(("Low", f"{pm} of your material request(s) are waiting for approval."))
     pmr = int((mr.Status == "Pending").sum()) if len(mr) else 0
-    if pmr:
+    if pmr and has(CEO):
         out.append(("Medium", f"{pmr} money request(s) waiting for your decision."))
-    ap = int((mr.Status == "Approved").sum()) if len(mr) else 0
+    elif pmr:
+        out.append(("Low", f"{pmr} of your money request(s) are waiting for the CEO."))
+    ap = int(((mr.Status == "Approved") & (mr["Requested by"] != me)).sum()) if len(mr) and has(CEO, ACCOUNTANT) else 0
     if ap:
         out.append(("Low", f"{ap} approved money request(s) not paid yet."))
+    if has(STORE) and len(reqs):
+        dv = int((reqs.Status == "Approved").sum())
+        if dv:
+            out.append(("Medium", f"{dv} approved material line(s) waiting for you to record the delivery."))
     if len(debts):
         late = debts[(debts.Due < str(date.today())) & (debts.Direction == "We owe")]
         if len(late):
@@ -3110,6 +3138,66 @@ def dash_recent(exp, fnd, mv, mr):
         rows.append({"Date": r.Date, "What": "Money request", "Field": r.Field, "Detail": f"{r.Purpose} - {r.Status}", "Amount": r.Requested, "By": r["Requested by"]})
     out = pd.DataFrame(rows, columns=["Date", "What", "Field", "Detail", "Amount", "By"])
     return out.sort_values("Date", ascending=False).head(10)
+
+
+def dash_materials_tab(bal, mv, reqs):
+    c1, c2 = st.columns(2)
+    with c1:
+        stat = pd.DataFrame({"Status": ["In stock", "Out of stock"], "Lines": [int((bal.Balance > 1e-9).sum()), int((bal.Balance <= 1e-9).sum())]}) if len(bal) else pd.DataFrame()
+        with card("Stock status", "Material lines with and without balance", stat if len(stat) else None, "stat"):
+            if len(stat):
+                c_donut(stat, "Status", "Lines", colors=["#0b6a35", "#c9453b"])
+            else:
+                st.caption("No materials recorded yet.")
+    with c2:
+        top = pd.DataFrame()
+        if len(bal):
+            top = bal[bal.Balance > 1e-9].assign(Item=lambda d: d.Material + " (" + d.Unit.fillna("") + ")").sort_values("Balance", ascending=False).head(10)[["Item", "Balance"]]
+        with card("Largest stock balances", "Top 10 materials in stock", top if len(top) else None, "topstock"):
+            if len(top):
+                c_bar(top, "Item", "Balance", unit="Quantity")
+            else:
+                st.caption("Nothing to show yet.")
+    c1, c2 = st.columns(2)
+    with c1:
+        rcv = pd.DataFrame()
+        if len(mv):
+            by = mv[mv.Type.isin(["Received", "Used"])].assign(Month=lambda d: d.Date.astype(str).str[:7])
+            if len(by):
+                rcv = by.groupby(["Month", "Type"]).size().unstack(fill_value=0).reindex(columns=["Received", "Used"], fill_value=0).sort_index().tail(12)
+                rcv.index = [month_label(x) for x in rcv.index]
+                rcv = rcv.reset_index().rename(columns={"index": "Month"})
+        with card("Materials received and used", "Number of movements by month", rcv if len(rcv) else None, "rcv"):
+            if len(rcv):
+                c_grouped(rcv, "Month", ["Received", "Used"], ytitle="Movements")
+            else:
+                st.caption("Nothing to show yet.")
+    with c2:
+        rs = reqs.groupby("Status", as_index=False).size().rename(columns={"size": "Lines"}) if len(reqs) else pd.DataFrame()
+        with card("Material requests by status", "All requests sent by the field managers", rs if len(rs) else None, "reqst"):
+            if len(rs):
+                c_donut(rs, "Status", "Lines")
+            else:
+                st.caption("No material requests yet.")
+    c1, c2 = st.columns(2)
+    with c1:
+        mr_top = reqs.groupby("Material", as_index=False).Requested.sum().sort_values("Requested", ascending=False).head(10) if len(reqs) else pd.DataFrame()
+        with card("Most requested materials", "Total quantity requested · top 10", mr_top if len(mr_top) else None, "mreq"):
+            if len(mr_top):
+                c_bar(mr_top, "Material", "Requested", unit="Quantity", color="#2f6fb0")
+            else:
+                st.caption("No material requests yet.")
+    with c2:
+        bycat = pd.DataFrame()
+        if len(bal):
+            mats = df("SELECT id, COALESCE(category, 'Uncategorised') AS category FROM materials")
+            inst = bal[bal.Balance > 1e-9].assign(Category=lambda d: d.material_id.map(dict(zip(mats.id, mats.category))).fillna("Uncategorised"))
+            bycat = inst.groupby("Category", as_index=False).size().rename(columns={"size": "Lines"}).sort_values("Lines", ascending=False)
+        with card("Materials in stock by category", "Number of material lines", bycat if len(bycat) else None, "matcat"):
+            if len(bycat):
+                c_bar(bycat, "Category", "Lines", unit="Lines")
+            else:
+                st.caption("Nothing to show yet.")
 
 
 # ---------- CEO dashboard ----------
@@ -3199,23 +3287,30 @@ def insights_html(rows):
 RED, AMBER, GREEN = "#c9453b", "#e0922f", "#1b8a4b"
 
 
-def ceo_dashboard():
+def dashboard_page():
+    if not has(CEO, ACCOUNTANT, FIELD):
+        return store_dashboard()
     user, field = st.session_state.user, st.session_state.get("ceo_field", "All fields")
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
+    can_funds, admin = has(*FUNDS_VISIBLE), has(CEO, ACCOUNTANT)
     ids = [int(i) for i in sites.id]
     exp, fnd, mv, reqs = load_expenses(ids), load_funds(ids), load_moves(ids), load_mat_requests(ids)
+    if not can_funds:
+        fnd = fnd.iloc[0:0]  # funds are for the CEO only
     mr, led = load_money_requests(), load_ledger()
     if field != "All fields":
         mr, led = mr[mr.Field == field], led[led.Field == field]
     mr, led = mr.reset_index(drop=True), led.reset_index(drop=True)
     debts, taxes = load_debts(field), load_taxes(field)
+    if not admin:
+        debts, taxes = debts.iloc[0:0], taxes.iloc[0:0]
     bal = stock_balances(mv)
     cats_all = categories_df().name.tolist()
 
     st.markdown(DASH_CSS, unsafe_allow_html=True)
-    st.markdown(f'<div class="dh">Financial dashboard</div><div class="dsub">{html.escape("All fields" if field == "All fields" else field)}'
+    st.markdown(f'<div class="dh">{"Financial dashboard" if admin else "Dashboard"}</div><div class="dsub">{html.escape("All fields" if field == "All fields" else field)}'
                 f' · all amounts in Frw · updates automatically when anything is recorded</div>', unsafe_allow_html=True)
 
     # ---- filters (the same four as the Excel dashboard) ----
@@ -3272,15 +3367,29 @@ def ceo_dashboard():
     balance = funds_all - spent_all
     used_pct = spent_all / funds_all * 100 if funds_all else None
     big_cat = exp.groupby("Category").Total.sum().sort_values(ascending=False)
-    kpi_grid([
-        kpi("Funds received", money(funds_all), "recorded in Funds received", "green"),
-        kpi("Recorded expenditure", money(spent_all), f"all {exp.Category.nunique()} categories used", "amber"),
-        kpi("Balance / (shortfall)", ("-" if balance < 0 else "") + money(abs(balance)), "funds − expenditure", "red" if balance < 0 else "green"),
-        kpi("Funds used", f"{used_pct:.1f}%" if used_pct is not None else "no funds", "expenditure ÷ funds",
-            "red" if (used_pct or 0) >= 100 else "amber" if (used_pct or 0) >= 90 else "green"),
-        kpi("Biggest cost category", big_cat.index[0] if len(big_cat) else "-", f"all time · {money(big_cat.iloc[0])} Frw" if len(big_cat) else "all time", "grey", small=True),
-        kpi("Last transaction", exp.Date.max() if len(exp) else "-", "latest date recorded", "grey"),
-    ])
+    if can_funds:
+        kpi_grid([
+            kpi("Funds received", money(funds_all), "recorded in Funds received", "green"),
+            kpi("Recorded expenditure", money(spent_all), f"all {exp.Category.nunique()} categories used", "amber"),
+            kpi("Balance / (shortfall)", ("-" if balance < 0 else "") + money(abs(balance)), "funds − expenditure", "red" if balance < 0 else "green"),
+            kpi("Funds used", f"{used_pct:.1f}%" if used_pct is not None else "no funds", "expenditure ÷ funds",
+                "red" if (used_pct or 0) >= 100 else "amber" if (used_pct or 0) >= 90 else "green"),
+            kpi("Biggest cost category", big_cat.index[0] if len(big_cat) else "-", f"all time · {money(big_cat.iloc[0])} Frw" if len(big_cat) else "all time", "grey", small=True),
+            kpi("Last transaction", exp.Date.max() if len(exp) else "-", "latest date recorded", "grey"),
+        ])
+    else:
+        budgeted0 = sites[sites.budget.fillna(0) > 0]
+        bud0 = float(budgeted0.budget.sum())
+        used0 = float(exp[exp.site_id.isin(budgeted0.id)].Total.sum()) / bud0 * 100 if bud0 else None
+        kpi_grid([
+            kpi("Recorded expenditure", money(spent_all), f"all {exp.Category.nunique()} categories used", "amber"),
+            kpi("Budget", money(bud0) if bud0 else "no budget", "Frw set for the field" if bud0 else "the CEO sets it in Fields & categories", "blue"),
+            kpi("Budget used", f"{used0:.1f}%" if used0 is not None else "-", "of the budget",
+                "red" if (used0 or 0) >= 100 else "amber" if (used0 or 0) >= 90 else "green"),
+            kpi("Entries recorded", f"{len(exp):,}", "all time", "green"),
+            kpi("Biggest cost category", big_cat.index[0] if len(big_cat) else "-", f"all time · {money(big_cat.iloc[0])} Frw" if len(big_cat) else "all time", "grey", small=True),
+            kpi("Last transaction", exp.Date.max() if len(exp) else "-", "latest date recorded", "grey"),
+        ])
 
     pend_mat = int(reqs[reqs.Status == "Pending"].batch.nunique()) if len(reqs) else 0
     pend_money = int((mr.Status == "Pending").sum()) if len(mr) else 0
@@ -3293,15 +3402,36 @@ def ceo_dashboard():
     spent_budgeted = float(exp[exp.site_id.isin(budgeted.id)].Total.sum())
     bpct = spent_budgeted / budget * 100 if budget else None
     st.markdown('<div class="dsec">Operations</div><div class="dcap">Approvals, stock, money and budget</div>', unsafe_allow_html=True)
-    kpi_grid([
-        kpi("Waiting for approval", pend_mat + pend_money, f"{pend_mat} material · {pend_money} money requests", "amber" if pend_mat + pend_money else "green"),
-        kpi("Materials out of stock", out_n, "material lines with no balance", "red" if out_n else "green"),
-        kpi("Money used (business)", money(biz), "Frw recorded in Money used", "blue"),
-        kpi("We owe (open)", money(we_owe), "unpaid debts", "amber" if we_owe else "green"),
-        kpi("Owed to us (open)", money(owed_us), "money others must pay us", "blue"),
-        kpi("Budget used", f"{bpct:.1f}%" if bpct is not None else "no budget", "of the budget set for the field" if bpct is not None else "set it in Fields & categories",
-            "red" if (bpct or 0) >= 100 else "amber" if (bpct or 0) >= 90 else "green"),
-    ])
+    me = user
+    mine_mat = int(reqs[(reqs.Status == "Pending") & (reqs["Requested by"] == me)].batch.nunique()) if len(reqs) else 0
+    mine_money = int(((mr.Status == "Pending") & (mr["Requested by"] == me)).sum()) if len(mr) else 0
+    bcard = kpi("Budget used", f"{bpct:.1f}%" if bpct is not None else "no budget", "of the budget set for the field" if bpct is not None else "no budget set for the field",
+                "red" if (bpct or 0) >= 100 else "amber" if (bpct or 0) >= 90 else "green")
+    if has(CEO):
+        kpi_grid([
+            kpi("Waiting for approval", pend_mat + pend_money, f"{pend_mat} material · {pend_money} money requests", "amber" if pend_mat + pend_money else "green"),
+            kpi("Materials out of stock", out_n, "material lines with no balance", "red" if out_n else "green"),
+            kpi("Money used (business)", money(biz), "Frw recorded in Money used", "blue"),
+            kpi("We owe (open)", money(we_owe), "unpaid debts", "amber" if we_owe else "green"),
+            kpi("Owed to us (open)", money(owed_us), "money others must pay us", "blue"),
+            bcard])
+    elif has(ACCOUNTANT):
+        to_ok = int(reqs[(reqs.Status == "Pending") & (reqs["Requested by"] != me)].batch.nunique()) if len(reqs) else 0
+        to_pay = int(((mr.Status == "Approved") & (mr["Requested by"] != me)).sum()) if len(mr) else 0
+        kpi_grid([
+            kpi("Material requests to approve", to_ok, "waiting for your approval", "amber" if to_ok else "green"),
+            kpi("Money requests to pay", to_pay, "approved by the CEO, not paid yet", "amber" if to_pay else "green"),
+            kpi("Materials out of stock", out_n, "material lines with no balance", "red" if out_n else "green"),
+            kpi("We owe (open)", money(we_owe), "unpaid debts", "amber" if we_owe else "green"),
+            kpi("Owed to us (open)", money(owed_us), "money others must pay us", "blue"),
+            bcard])
+    else:
+        kpi_grid([
+            kpi("My material requests", mine_mat, "waiting for approval", "amber" if mine_mat else "green"),
+            kpi("My money requests", mine_money, "waiting for the CEO", "amber" if mine_money else "green"),
+            kpi("Materials out of stock", out_n, "material lines with no balance", "red" if out_n else "green"),
+            kpi("Money used (mine)", money(biz), "Frw recorded in Money used", "blue"),
+            bcard])
 
     # ---- what the data says ----
     says = []
@@ -3324,7 +3454,7 @@ def ceo_dashboard():
     # ---- charts ----
     st.markdown('<div class="dsec">Analysis</div><div class="dcap">Hover a chart for the exact value. Click a bar in the category ranking to filter the whole page. '
                 'Every chart has a Download data button.</div>', unsafe_allow_html=True)
-    t_sp, t_fin, t_mat, t_time, t_money, t_act = st.tabs(["Spending", "Financial", "Materials", "Time spent", "Money, taxes & debts", "Activity"])
+    t_sp, t_fin, t_mat, t_time, t_money, t_act = st.tabs(["Spending", "Financial", "Materials", "Time spent", "Money, taxes & debts" if admin else "Money", "Activity"])
     metric = "Transactions" if by_count else "Amount"
     unit = "entries" if by_count else "Frw"
 
@@ -3361,7 +3491,7 @@ def ceo_dashboard():
                 cm = cm.fillna(0).sort_index().cumsum().reset_index()
                 cm.columns = ["Month"] + list(cm.columns[1:])
                 cm["Month"] = [month_label(m) for m in cm.Month]
-            with card("Cumulative spend vs funds received", "Whole project · when the spending line passes the funds line, money is short", cm if len(cm) else None, "cum"):
+            with card("Cumulative spend vs funds received" if can_funds else "Cumulative spending", "Whole project · when the spending line passes the funds line, money is short" if can_funds else "Whole project · month by month", cm if len(cm) else None, "cum"):
                 if len(cm):
                     c_lines(cm, "Month", [c for c in ["Spent (cumulative)", "Funds received"] if c in cm.columns])
                 else:
@@ -3381,7 +3511,7 @@ def ceo_dashboard():
             if len(m):
                 m.columns = ["Month"] + list(m.columns[1:])
                 m["Month"] = [month_label(x) for x in m.Month]
-            with card("Spent and funds received by month", "Last 12 months · whole project", m if len(m) else None, "spf"):
+            with card("Spent and funds received by month" if can_funds else "Spending by month", "Last 12 months · whole project", m if len(m) else None, "spf"):
                 if len(m):
                     c_grouped(m, "Month", [c for c in ["Spent", "Funds received"] if c in m.columns])
                 else:
@@ -3414,67 +3544,12 @@ def ceo_dashboard():
             per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0)
             per["Spent"] = per.id.map(exp.groupby("site_id").Total.sum()).fillna(0)
             per = per.sort_values("Spent", ascending=False).head(10)
-            with card("Funds received and spent by field", "Compare the fields side by side", per[["Field", "Funds received", "Spent"]], "perfield"):
-                c_grouped(per, "Field", ["Funds received", "Spent"])
+            cols_ = ["Funds received", "Spent"] if can_funds else ["Spent"]
+            with card("Funds received and spent by field" if can_funds else "Spending by field", "Compare the fields side by side", per[["Field"] + cols_], "perfield"):
+                c_grouped(per, "Field", cols_)
 
     with t_mat:
-        c1, c2 = st.columns(2)
-        with c1:
-            stat = pd.DataFrame({"Status": ["In stock", "Out of stock"], "Lines": [int((bal.Balance > 1e-9).sum()), int((bal.Balance <= 1e-9).sum())]}) if len(bal) else pd.DataFrame()
-            with card("Stock status", "Material lines with and without balance", stat if len(stat) else None, "stat"):
-                if len(stat):
-                    c_donut(stat, "Status", "Lines", colors=["#0b6a35", "#c9453b"])
-                else:
-                    st.caption("No materials recorded yet.")
-        with c2:
-            top = pd.DataFrame()
-            if len(bal):
-                top = bal[bal.Balance > 1e-9].assign(Item=lambda d: d.Material + " (" + d.Unit.fillna("") + ")").sort_values("Balance", ascending=False).head(10)[["Item", "Balance"]]
-            with card("Largest stock balances", "Top 10 materials in stock", top if len(top) else None, "topstock"):
-                if len(top):
-                    c_bar(top, "Item", "Balance", unit="Quantity")
-                else:
-                    st.caption("Nothing to show yet.")
-        c1, c2 = st.columns(2)
-        with c1:
-            rcv = pd.DataFrame()
-            if len(mv):
-                by = mv[mv.Type.isin(["Received", "Used"])].assign(Month=lambda d: d.Date.astype(str).str[:7])
-                if len(by):
-                    rcv = by.groupby(["Month", "Type"]).size().unstack(fill_value=0).reindex(columns=["Received", "Used"], fill_value=0).sort_index().tail(12)
-                    rcv.index = [month_label(x) for x in rcv.index]
-                    rcv = rcv.reset_index().rename(columns={"index": "Month"})
-            with card("Materials received and used", "Number of movements by month", rcv if len(rcv) else None, "rcv"):
-                if len(rcv):
-                    c_grouped(rcv, "Month", ["Received", "Used"], ytitle="Movements")
-                else:
-                    st.caption("Nothing to show yet.")
-        with c2:
-            rs = reqs.groupby("Status", as_index=False).size().rename(columns={"size": "Lines"}) if len(reqs) else pd.DataFrame()
-            with card("Material requests by status", "All requests sent by the field managers", rs if len(rs) else None, "reqst"):
-                if len(rs):
-                    c_donut(rs, "Status", "Lines")
-                else:
-                    st.caption("No material requests yet.")
-        c1, c2 = st.columns(2)
-        with c1:
-            mr_top = reqs.groupby("Material", as_index=False).Requested.sum().sort_values("Requested", ascending=False).head(10) if len(reqs) else pd.DataFrame()
-            with card("Most requested materials", "Total quantity requested · top 10", mr_top if len(mr_top) else None, "mreq"):
-                if len(mr_top):
-                    c_bar(mr_top, "Material", "Requested", unit="Quantity", color="#2f6fb0")
-                else:
-                    st.caption("No material requests yet.")
-        with c2:
-            bycat = pd.DataFrame()
-            if len(bal):
-                mats = df("SELECT id, COALESCE(category, 'Uncategorised') AS category FROM materials")
-                inst = bal[bal.Balance > 1e-9].assign(Category=lambda d: d.material_id.map(dict(zip(mats.id, mats.category))).fillna("Uncategorised"))
-                bycat = inst.groupby("Category", as_index=False).size().rename(columns={"size": "Lines"}).sort_values("Lines", ascending=False)
-            with card("Materials in stock by category", "Number of material lines", bycat if len(bycat) else None, "matcat"):
-                if len(bycat):
-                    c_bar(bycat, "Category", "Lines", unit="Lines")
-                else:
-                    st.caption("Nothing to show yet.")
+        dash_materials_tab(bal, mv, reqs)
 
     with t_time:
         c1, c2 = st.columns(2)
@@ -3553,21 +3628,22 @@ def ceo_dashboard():
                     c_donut(ms_, "Status", "Requests")
                 else:
                     st.caption("No money requests yet.")
-        c1, c2 = st.columns(2)
-        with c1:
-            tx = taxes.groupby("Tax", as_index=False).Amount.sum().sort_values("Amount", ascending=False) if len(taxes) else pd.DataFrame()
-            with card("Taxes paid by type", "All recorded tax payments", tx if len(tx) else None, "tax"):
-                if len(tx):
-                    c_bar(tx, "Tax", "Amount", unit="Frw", color="#2f6fb0")
-                else:
-                    st.caption("No tax payments yet.")
-        with c2:
-            db = debts.groupby("Direction", as_index=False).Balance.sum() if len(debts) else pd.DataFrame()
-            with card("Open debts", "What we owe and what is owed to us", db if len(db) else None, "debt"):
-                if len(db):
-                    c_donut(db, "Direction", "Balance", colors=["#c9453b", "#0b6a35"])
-                else:
-                    st.caption("No open debts.")
+        if admin:
+            c1, c2 = st.columns(2)
+            with c1:
+                tx = taxes.groupby("Tax", as_index=False).Amount.sum().sort_values("Amount", ascending=False) if len(taxes) else pd.DataFrame()
+                with card("Taxes paid by type", "All recorded tax payments", tx if len(tx) else None, "tax"):
+                    if len(tx):
+                        c_bar(tx, "Tax", "Amount", unit="Frw", color="#2f6fb0")
+                    else:
+                        st.caption("No tax payments yet.")
+            with c2:
+                db = debts.groupby("Direction", as_index=False).Balance.sum() if len(debts) else pd.DataFrame()
+                with card("Open debts", "What we owe and what is owed to us", db if len(db) else None, "debt"):
+                    if len(db):
+                        c_donut(db, "Direction", "Balance", colors=["#c9453b", "#0b6a35"])
+                    else:
+                        st.caption("No open debts.")
 
     with t_act:
         c1, c2 = st.columns(2)
@@ -3617,7 +3693,7 @@ def stock_sheet(mv, reqs):
     return pd.DataFrame(rows, columns=["Date", "Field", "Category", "Item", "Unit", "In stock", "Received", "Used", "Requested", "By"])
 
 
-def ceo_stock():
+def stock_page():
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
@@ -3651,19 +3727,20 @@ def ceo_stock():
         wide(st.dataframe, pretty(shown, qty_cols=["In stock", "Received", "Used", "Requested"]), hide_index=True)
         st.download_button(":material/download: Download Excel", to_excel({"Stock balance": shown}),
                            f"material_stock_{date.today()}.xlsx", mime=XLSX, key="dl_ceo_stock")
-        with st.expander("Set the category of a material"):
-            st.caption("Categories are the same as the cost workbook. Add a new category in Fields & categories.")
-            mats = df("SELECT id, name, unit, COALESCE(category, '') AS category FROM materials ORDER BY name")
-            opts = categories_df().name.tolist()
-            tbl = mats.rename(columns={"name": "Item", "unit": "Unit", "category": "Category"}).drop(columns="id")
-            tbl["Category"] = tbl["Category"].where(tbl["Category"] != "", None)
-            ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mc')}_{len(mats)}", disabled=["Item", "Unit"], column_config={
-                "Category": st.column_config.SelectboxColumn("Category", options=opts, required=False)})
-            if st.button("Save categories", key="mc_save"):
-                with conn() as c:
-                    for i, cat_ in zip(mats.id, ed["Category"]):
-                        c.execute("UPDATE materials SET category=? WHERE id=?", (cat_ if isinstance(cat_, str) and cat_ else None, int(i)))
-                done("Categories saved.")
+        if has(CEO, ACCOUNTANT, STORE):
+            with st.expander("Set the category of a material"):
+                st.caption("Categories are the same as the cost workbook. Add a new category in Fields & categories.")
+                mats = df("SELECT id, name, unit, COALESCE(category, '') AS category FROM materials ORDER BY name")
+                opts = categories_df().name.tolist()
+                tbl = mats.rename(columns={"name": "Item", "unit": "Unit", "category": "Category"}).drop(columns="id")
+                tbl["Category"] = tbl["Category"].where(tbl["Category"] != "", None)
+                ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mc')}_{len(mats)}", disabled=["Item", "Unit"], column_config={
+                    "Category": st.column_config.SelectboxColumn("Category", options=opts, required=False)})
+                if st.button("Save categories", key="mc_save"):
+                    with conn() as c:
+                        for i, cat_ in zip(mats.id, ed["Category"]):
+                            c.execute("UPDATE materials SET category=? WHERE id=?", (cat_ if isinstance(cat_, str) and cat_ else None, int(i)))
+                    done("Categories saved.")
 
     st.subheader("Movements")
     m1, m2 = st.columns([2, 3])
@@ -3683,7 +3760,27 @@ def ceo_stock():
 
 
 # ---------- CEO: material requests (he approves and adds; he does not request) ----------
-def ceo_matreq():
+def matreq_all(reqs):
+    if reqs.empty:
+        st.caption("No requests yet.")
+    else:
+        c1, c2 = st.columns([2, 3])
+        status = c1.radio("Show", ["All", "Pending", "Approved", "Delivered", "Rejected"], horizontal=True, key="cr_st")
+        with c2:
+            q = search_box("cr_q", "Search material, field or person", "Type part of a name…")
+        view = reqs if status == "All" else reqs[reqs.Status == status]
+        view = match(view, ["Material", "Field", "Requested by", "Decided by"], q)
+        cols = ["batch", "Date", "Field", "Material", "Unit", "Requested", "Approved", "Delivered", "Status", "Needed by", "Requested by", "Decided by", "Reason"]
+        shown = view[cols].rename(columns={"batch": "Request #"}).reset_index(drop=True)
+        shown.insert(0, "No", range(1, len(shown) + 1))
+        st.caption(f"{len(shown)} lines")
+        wide(st.dataframe, pretty(shown, status_col="Status", qty_cols=["Requested", "Approved", "Delivered"]), hide_index=True)
+        if len(shown):
+            st.download_button(":material/download: Download Excel", to_excel({"Material requests": shown}),
+                               f"material_requests_{date.today()}.xlsx", mime=XLSX, key="dl_ceo_req")
+
+
+def matreq_ceo():
     user, uid = st.session_state.user, st.session_state.uid
     sites = visible_sites()
     if sites.empty:
@@ -3720,27 +3817,11 @@ def ceo_matreq():
                         c.execute("DELETE FROM expenses WHERE id=?", (rid,))
                 done(f"{len(ticked)} row(s) deleted.")
     with t3:
-        if reqs.empty:
-            st.caption("No requests yet.")
-        else:
-            c1, c2 = st.columns([2, 3])
-            status = c1.radio("Show", ["All", "Pending", "Approved", "Delivered", "Rejected"], horizontal=True, key="cr_st")
-            with c2:
-                q = search_box("cr_q", "Search material, field or person", "Type part of a name…")
-            view = reqs if status == "All" else reqs[reqs.Status == status]
-            view = match(view, ["Material", "Field", "Requested by", "Decided by"], q)
-            cols = ["batch", "Date", "Field", "Material", "Unit", "Requested", "Approved", "Delivered", "Status", "Needed by", "Requested by", "Decided by", "Reason"]
-            shown = view[cols].rename(columns={"batch": "Request #"}).reset_index(drop=True)
-            shown.insert(0, "No", range(1, len(shown) + 1))
-            st.caption(f"{len(shown)} lines")
-            wide(st.dataframe, pretty(shown, status_col="Status", qty_cols=["Requested", "Approved", "Delivered"]), hide_index=True)
-            if len(shown):
-                st.download_button(":material/download: Download Excel", to_excel({"Material requests": shown}),
-                                   f"material_requests_{date.today()}.xlsx", mime=XLSX, key="dl_ceo_req")
+        matreq_all(reqs)
 
 
 # ---------- CEO: expenses ----------
-def ceo_expenses():
+def expenses_page():
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
@@ -3769,14 +3850,55 @@ def ceo_expenses():
         download_workbook(view, "expenses", "ce_wb")
     with c2:
         if ticked and st.button("Delete ticked rows", key="ce_del"):
-            with conn() as c_:
-                for rid in ticked:
-                    c_.execute("DELETE FROM expenses WHERE id=?", (rid,))
-            done(f"{len(ticked)} row(s) deleted.")
+            if has(CEO):
+                with conn() as c_:
+                    for rid in ticked:
+                        c_.execute("DELETE FROM expenses WHERE id=?", (rid,))
+                n_del = len(ticked)
+            else:
+                n_del = delete_expenses(ticked, st.session_state.user, st.session_state.uid, has(ACCOUNTANT))
+            done(f"{n_del} row(s) deleted." if n_del else "Nothing deleted: you can only delete your own entries of today.")
 
 
 # ---------- CEO: money requests ----------
-def ceo_moneyreq():
+def money_pay_block(reqs, user):
+    appr = reqs[(reqs.Status == "Approved") & (reqs["Requested by"] != user)]
+    if appr.empty:
+        st.success("No approved request is waiting for payment.")
+    else:
+        st.caption("Tick Paid when the money has been given. It is then added to the person's money used.")
+        tbl = pd.DataFrame({"Request #": appr.id.values, "By": appr["Requested by"].values, "Field": appr.Field.values,
+                            "Category": appr.Category.values, "Purpose": appr.Purpose.values, "Approved": appr.Approved.values, "Paid": False})
+        ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mx')}_{len(appr)}_{int(appr.id.iloc[0])}",
+                  disabled=["Request #", "By", "Field", "Category", "Purpose", "Approved"], column_config={"Paid": st.column_config.CheckboxColumn()})
+        if st.button("Record payment", type="primary", key="cmx_go"):
+            pids = [int(i) for i, p in zip(appr.id, ed["Paid"]) if p]
+            if not pids:
+                st.info("Tick the requests that were paid.")
+            else:
+                done(f"{pay_money_requests(pids, user)} payment(s) recorded.")
+
+
+def money_all(reqs):
+    if reqs.empty:
+        return st.caption("No money requests yet.")
+    a, b, c = st.columns([2, 2, 3])
+    status = a.radio("Show", ["All", "Pending", "Approved", "Paid", "Rejected"], horizontal=True, key="cmr_st")
+    cat = b.selectbox("Category", ["All categories"] + categories_df().name.tolist(), key="cmr_cat")
+    with c:
+        q = search_box("cmr_q", "Search purpose, category or person", "Type part of a word…")
+    view = reqs if status == "All" else reqs[reqs.Status == status]
+    view = view if cat == "All categories" else view[view.Category == cat]
+    view = match(view, ["Purpose", "Category", "Requested by", "Field"], q)
+    sheet = view.assign(Item=view.Purpose, Qty=1.0, **{"P/U": view.Requested, "Total": view.Requested})
+    extras = ["Category", "Field", "Approved", "Status", "Needed by", "Requested by", "Decided by", "Reason", "Paid on"]
+    t = sheet_number(sheet, CORE + extras)
+    st.markdown(f"**{len(t)} requests · Grand total {money(pd.to_numeric(t.Total).sum())} Frw**")
+    wide(st.dataframe, pretty(t, ["P/U", "Total", "Approved"], "Status", qty_cols=["Qty"]), hide_index=True)
+    download_sheet(sheet, extras, "Money requests", "cmr_dl")
+
+
+def moneyreq_ceo():
     user = st.session_state.user
     field = st.session_state.get("ceo_field", "All fields")
     reqs = load_money_requests()
@@ -3820,45 +3942,13 @@ def ceo_moneyreq():
                         ok_n = sum(a > 0 for a, _ in decisions.values())
                         done(f"{ok_n} approved, {len(decisions) - ok_n} rejected.")
     with t2:
-        appr = reqs[(reqs.Status == "Approved") & (reqs["Requested by"] != user)]
-        if appr.empty:
-            st.success("No approved request is waiting for payment.")
-        else:
-            st.caption("Tick Paid when the money has been given. It is then added to the person's money used.")
-            tbl = pd.DataFrame({"Request #": appr.id.values, "By": appr["Requested by"].values, "Field": appr.Field.values,
-                                "Category": appr.Category.values, "Purpose": appr.Purpose.values, "Approved": appr.Approved.values, "Paid": False})
-            ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mx')}_{len(appr)}_{int(appr.id.iloc[0])}",
-                      disabled=["Request #", "By", "Field", "Category", "Purpose", "Approved"], column_config={"Paid": st.column_config.CheckboxColumn()})
-            if st.button("Record payment", type="primary", key="cmx_go"):
-                pids = [int(i) for i, p in zip(appr.id, ed["Paid"]) if p]
-                if not pids:
-                    st.info("Tick the requests that were paid.")
-                else:
-                    done(f"{pay_money_requests(pids, user)} payment(s) recorded.")
+        money_pay_block(reqs, user)
     with t3:
-        if reqs.empty:
-            return st.caption("No money requests yet.")
-        a, b, c = st.columns([2, 2, 3])
-        status = a.radio("Show", ["All", "Pending", "Approved", "Paid", "Rejected"], horizontal=True, key="cmr_st")
-        cat = b.selectbox("Category", ["All categories"] + categories_df().name.tolist(), key="cmr_cat")
-        with c:
-            q = search_box("cmr_q", "Search purpose, category or person", "Type part of a word…")
-        view = reqs if status == "All" else reqs[reqs.Status == status]
-        view = view if cat == "All categories" else view[view.Category == cat]
-        view = match(view, ["Purpose", "Category", "Requested by", "Field"], q)
-        sheet = view.assign(Item=view.Purpose, Qty=1.0, **{"P/U": view.Requested, "Total": view.Requested})
-        extras = ["Category", "Field", "Approved", "Status", "Needed by", "Requested by", "Decided by", "Reason", "Paid on"]
-        t = sheet_number(sheet, CORE + extras)
-        st.markdown(f"**{len(t)} requests · Grand total {money(pd.to_numeric(t.Total).sum())} Frw**")
-        wide(st.dataframe, pretty(t, ["P/U", "Total", "Approved"], "Status", qty_cols=["Qty"]), hide_index=True)
-        download_sheet(sheet, extras, "Money requests", "cmr_dl")
+        money_all(reqs)
 
 
 # ---------- CEO: money used ----------
-def ceo_moneyused():
-    user = st.session_state.user
-    field = st.session_state.get("ceo_field", "All fields")
-    sites = visible_sites()
+def moneyused_form(sites, field, user):
     with st.expander("Record money I used (Excel sheet)", expanded=True):
         st.caption("Money you spent yourself: materials, fuel, food, personal use. Personal entries are visible only to you.")
         a, b, c = st.columns(3)
@@ -3890,6 +3980,14 @@ def ceo_moneyused():
                                                      "entered_by", "entered_at"],
                                 [(str(e["date"]), user, fc[fname], kind, cat, e["total"], e["item"], e["qty"], e["price"], user, now) for e in ok])
                 done(f"{len(ok)} row(s) saved.")
+
+
+def moneyused_page():
+    user = st.session_state.user
+    field = st.session_state.get("ceo_field", "All fields")
+    sites = visible_sites()
+    if has(CEO):
+        moneyused_form(sites, field, user)
     st.subheader("Money used")
     led = load_ledger()
     if field != "All fields":
@@ -3928,7 +4026,7 @@ def ceo_moneyused():
 
 
 # ---------- CEO: funds received ----------
-def ceo_funds():
+def funds_page():
     user = st.session_state.user
     sites = visible_sites()
     if sites.empty:
@@ -3969,7 +4067,7 @@ def ceo_funds():
 
 
 # ---------- CEO: reports ----------
-def ceo_reports():
+def reports_page():
     sites = visible_sites()
     if sites.empty:
         return no_field_message()
@@ -3995,15 +4093,18 @@ def ceo_reports():
     with s2:
         c_donut(top_other(sel, "Category", "Total"), "Category", "Total")
     sheets = {"By category": by_cat, "By month": by_month}
-    fnd = load_funds(ids)
     per = sites.rename(columns={"name": "Field"})[["id", "Field"]].copy()
-    per["Funds received"] = per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0).astype(int)
     per["Spent"] = per.id.map(exp.groupby("site_id").Total.sum()).fillna(0).astype(int)
-    per["Balance"] = per["Funds received"] - per["Spent"]
-    sheets["Funds and balance"] = per.drop(columns="id")
+    money_cols = ["Spent"]
+    if has(*FUNDS_VISIBLE):
+        fnd = load_funds(ids)
+        per.insert(1, "Funds received", per.id.map(fnd.groupby("site_id").Amount.sum()).fillna(0).astype(int))
+        per["Balance"] = per["Funds received"] - per["Spent"]
+        money_cols = ["Funds received", "Spent", "Balance"]
+    sheets["By field" if not has(*FUNDS_VISIBLE) else "Funds and balance"] = per.drop(columns="id")
     if len(sites) > 1:
-        st.markdown("**Funds and balance by field**")
-        wide(st.dataframe, pretty(sheets["Funds and balance"], ["Funds received", "Spent", "Balance"]), hide_index=True)
+        st.markdown("**By field**" if not has(*FUNDS_VISIBLE) else "**Funds and balance by field**")
+        wide(st.dataframe, pretty(per.drop(columns="id"), money_cols), hide_index=True)
     st.download_button(":material/download: Download the summary (Excel)", to_excel(sheets), f"summary_{norm(field) or 'all'}_{date.today()}.xlsx",
                        mime=XLSX, key="dl_cr_sum")
 
@@ -4021,14 +4122,179 @@ def ceo_reports():
         download_workbook(cost_frame(sel), "report_all_categories", "cr_wb", "Download all categories (one sheet each)")
 
 
-CEO_RENDER = {"dashboard": ceo_dashboard, "stock": ceo_stock, "matreq": ceo_matreq, "expenses": ceo_expenses,
-              "moneyreq": ceo_moneyreq, "moneyused": ceo_moneyused, "funds": ceo_funds, "reports": ceo_reports}
+def money_new_block(sites, reqs, user):
+    st.subheader("New money request")
+    st.caption("Ask the CEO for money, for example for fuel, transport, tools or materials.")
+    fc = field_choices(sites)
+    a1, a2, a3 = st.columns(3)
+    field = a1.selectbox("Field", list(fc), key=K("mf"))
+    cat = a2.selectbox("Category", money_cats(), key=K("mc"))
+    newcat = a3.text_input("or a new category", key=K("mn"))
+    b1, b2, b3 = st.columns([1, 2, 1])
+    amount = b1.number_input("Amount (Frw)", min_value=1, step=1000, value=None, placeholder="Enter amount", key=K("ma"))
+    purpose = b2.text_input("What is it for?", key=K("mp"))
+    needed = b3.date_input("Needed by", date.today() + timedelta(days=2), min_value=date.today(), key=K("md"))
+    if st.button("Send request to the CEO", type="primary", key="mr_send"):
+        if not amount or not purpose.strip():
+            st.warning("Enter the amount and what it is for.")
+        else:
+            create_money_request(fc[field], cat, newcat, purpose, amount, needed, user)
+            done(f"Request for {money(amount)} Frw sent to the CEO.")
+    mine = reqs[(reqs.Status == "Pending") & (reqs["Requested by"] == user)]
+    if len(mine):
+        st.subheader("My pending requests")
+        tbl = pd.DataFrame({"Request #": mine.id.values, "Category": mine.Category.values, "Purpose": mine.Purpose.values,
+                            "Amount": mine.Requested.values, "Remove": False})
+        ed = wide(st.data_editor, tbl, hide_index=True, key=f"{K('mq')}_{len(mine)}_{int(mine.id.iloc[0])}",
+                  disabled=["Request #", "Category", "Purpose"], column_config={"Amount": st.column_config.NumberColumn(min_value=1, step=1000),
+                                                                                "Remove": st.column_config.CheckboxColumn()})
+        if st.button("Save changes", key="mq_save"):
+            removes = [int(i) for i, rm in zip(mine.id, ed["Remove"]) if rm]
+            changes = {int(i): float(a) for i, a, rm, old in zip(mine.id, ed["Amount"], ed["Remove"], mine.Requested)
+                       if not rm and pd.notna(a) and float(a) != float(old)}
+            if not removes and not changes:
+                st.info("Nothing to change.")
+            else:
+                skipped = update_money_pending(user, changes, removes)
+                done("Changes saved." + (f" {skipped} could not be changed because they were already decided." if skipped else ""))
+
+
+def sheet_show(frame, extras, name, key):
+    """A read-only table in the workbook layout (No, Date, Item, Qty, P/U, Total + extras) with its download bar."""
+    cols = CORE + [c for c in extras if c in frame.columns]
+    t = sheet_number(frame, cols)
+    st.markdown(f"**{len(t)} rows · Grand total {money(pd.to_numeric(t.Total).sum())} Frw**")
+    wide(st.dataframe, pretty(t.head(300), ["P/U", "Total"], "Status" if "Status" in t.columns else None, qty_cols=["Qty"]), hide_index=True)
+    if len(t):
+        download_sheet(frame, extras, name, key)
+
+
+def matreq_page():
+    """Material requests for the Accountant, Store manager and Field manager (the CEO has his own page)."""
+    if has(CEO):
+        return matreq_ceo()
+    user, uid = st.session_state.user, st.session_state.uid
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    reqs = load_mat_requests([int(i) for i in sites.id])
+    pend = reqs[(reqs.Status == "Pending") & (reqs["Requested by"] != user)] if len(reqs) else reqs
+    to_deliver = reqs[reqs.Status == "Approved"] if len(reqs) else reqs
+    names = []
+    if has(ACCOUNTANT):
+        names.append(f"Waiting for approval ({int(pend.batch.nunique()) if len(pend) else 0})")
+    if has(STORE):
+        names.append(f"Record delivery ({len(to_deliver)})")
+    names += ["New request", "All requests"]
+    tabs = st.tabs(names)
+    i = 0
+    if has(ACCOUNTANT):
+        with tabs[i]:
+            section_approve(reqs, sites.iloc[:1], user, False)
+        i += 1
+    if has(STORE):
+        with tabs[i]:
+            section_delivery(reqs, user, uid)
+        i += 1
+    with tabs[i]:
+        section_new(sites, user)
+        section_mine(reqs, user)
+    with tabs[i + 1]:
+        matreq_all(reqs)
+
+
+def moneyreq_page():
+    """Money requests for the Accountant, Store manager and Field manager (the CEO has his own page)."""
+    if has(CEO):
+        return moneyreq_ceo()
+    user = st.session_state.user
+    field = st.session_state.get("ceo_field", "All fields")
+    sites = visible_sites()
+    reqs = load_money_requests()
+    if field != "All fields":
+        reqs = reqs[reqs.Field == field]
+    reqs = reqs.reset_index(drop=True)
+    pay = reqs[(reqs.Status == "Approved") & (reqs["Requested by"] != user)] if has(ACCOUNTANT) else reqs.iloc[0:0]
+    names = ["New request"] + ([f"Approved: record the payment ({len(pay)})"] if has(ACCOUNTANT) else []) + ["All requests"]
+    tabs = st.tabs(names)
+    with tabs[0]:
+        money_new_block(sites, reqs, user)
+    if has(ACCOUNTANT):
+        with tabs[1]:
+            money_pay_block(reqs, user)
+    with tabs[-1]:
+        money_all(reqs)
+
+
+def store_dashboard():
+    """Dashboard of the Store manager: stock, deliveries and movements, in the same style as the other dashboards."""
+    user, field = st.session_state.user, st.session_state.get("ceo_field", "All fields")
+    sites = visible_sites()
+    if sites.empty:
+        return no_field_message()
+    ids = [int(i) for i in sites.id]
+    mv, reqs = load_moves(ids), load_mat_requests(ids)
+    bal = stock_balances(mv)
+    st.markdown(DASH_CSS, unsafe_allow_html=True)
+    st.markdown(f'<div class="dh">Dashboard</div><div class="dsub">{html.escape("All fields" if field == "All fields" else field)}'
+                f' · materials and stock · updates automatically when anything is recorded</div>', unsafe_allow_html=True)
+    months = []
+    cur = date.today().replace(day=1)
+    for _ in range(6):
+        months.insert(0, str(cur)[:7])
+        cur = (cur - timedelta(days=1)).replace(day=1)
+    labs = [month_label(m, False) for m in months]
+    rec_m = monthly_vals(mv[mv.Type == "Received"] if len(mv) else mv, "Qty", months, "count")
+    use_m = monthly_vals(mv[mv.Type == "Used"] if len(mv) else mv, "Qty", months, "count")
+    since = str(date.today() - timedelta(days=30))
+    in_n = int((bal.Balance > 1e-9).sum()) if len(bal) else 0
+    out_n = int((bal.Balance <= 1e-9).sum()) if len(bal) else 0
+    to_deliver = int((reqs.Status == "Approved").sum()) if len(reqs) else 0
+    pending = int(reqs[reqs.Status == "Pending"].batch.nunique()) if len(reqs) else 0
+    rec30 = int(((mv.Type == "Received") & (mv.Date >= since)).sum()) if len(mv) else 0
+    use30 = int(((mv.Type == "Used") & (mv.Date >= since)).sum()) if len(mv) else 0
+    st.markdown('<div class="dsec">Stock today</div><div class="dcap">Material lines in the store</div>', unsafe_allow_html=True)
+    kpi_grid([
+        kpi("Materials in stock", in_n, "material lines with a balance", "green"),
+        kpi("Out of stock", out_n, "material lines with no balance", "red" if out_n else "green"),
+        kpi("Received (30 days)", rec30, "receiving entries", "blue", spark_svg(rec_m, labs, "#2f6fb0"),
+            trend(rec_m[-1], rec_m[-2], labs[-2], lambda v: f"{v:,.0f}")),
+        kpi("Used (30 days)", use30, "usage entries", "amber", spark_svg(use_m, labs, "#e0922f"),
+            trend(use_m[-1], use_m[-2], labs[-2], lambda v: f"{v:,.0f}")),
+        kpi("Deliveries to record", to_deliver, "approved lines waiting for you", "amber" if to_deliver else "green"),
+        kpi("Requests waiting approval", pending, "sent, not yet decided", "grey"),
+    ])
+    says = []
+    empty = lambda f: f.iloc[0:0]
+    for lvl, text in dash_alerts(sites, empty(load_expenses(ids)), empty(load_funds(ids)), bal, empty(load_money_requests()), reqs, empty(load_debts(field))):
+        says.append((RED if lvl == "High" else AMBER if lvl == "Medium" else "#2f6fb0", html.escape(text)))
+    if len(mv):
+        gap = (date.today() - date.fromisoformat(str(mv.Date.max())[:10])).days
+        if gap >= 7:
+            says.append((AMBER, f"No stock movement has been recorded for {gap} days."))
+    st.markdown('<div class="dsec">What the data says</div>', unsafe_allow_html=True)
+    insights_html(says[:8])
+    st.markdown('<div class="dsec">Analysis</div><div class="dcap">Hover a chart for the exact value. Every chart has a Download data button.</div>', unsafe_allow_html=True)
+    t_mat, t_act = st.tabs(["Materials", "Activity"])
+    with t_mat:
+        dash_materials_tab(bal, mv, reqs)
+    with t_act:
+        mvs = mv.head(30)[["Date", "Field", "Material", "Unit", "Type", "Qty", "Detail", "Entered by"]].reset_index(drop=True) if len(mv) else pd.DataFrame()
+        with card("Recent movements", "The latest 30 entries", mvs if len(mvs) else None, "smv"):
+            if len(mvs):
+                mvs.insert(0, "No", range(1, len(mvs) + 1))
+                wide(st.dataframe, pretty(mvs, qty_cols=["Qty"]), hide_index=True)
+            else:
+                st.caption("Nothing recorded yet.")
+
+
+NEW_RENDER = {"dashboard": dashboard_page, "stock": stock_page, "matreq": matreq_page, "expenses": expenses_page,
+              "moneyreq": moneyreq_page, "moneyused": moneyused_page, "funds": funds_page, "reports": reports_page}
 
 
 PAGE_DEFS = [  # key, label, icon, roles that get the page. A user with several roles gets all their pages.
-    ("dashboard", "Dashboard", "dashboard", (CEO, ACCOUNTANT, FIELD)),
+    ("dashboard", "Dashboard", "dashboard", ALL),
     ("stock", "Material stock", "inventory_2", ALL),
-    ("analytics", "Analytics", "monitoring", (ACCOUNTANT, STORE, FIELD)),
     ("matreq", "Material requests", "shopping_cart", ALL),
     ("receive", "Materials received", "move_to_inbox", (STORE,)),
     ("use", "Materials used", "outbox", (STORE,)),
@@ -4052,10 +4318,8 @@ RENDER = {"dashboard": page_dashboard, "expenses": page_expenses, "funds": page_
 def allowed_pages():
     out = []
     for key, label, icon, roles in PAGE_DEFS:
-        if key == "analytics" and has(CEO):
-            continue  # the CEO's Dashboard holds all the charts
         if has(*roles):
-            out.append((key, "Dashboard" if key == "stock" and not has(CEO, ACCOUNTANT, FIELD) else label, icon))
+            out.append((key, label, icon))
     return out
 
 
@@ -4090,9 +4354,9 @@ def main():
     header(title)
     show_flash()
     page = RENDER[sec]
-    if has(CEO) and sec in CEO_RENDER:
-        page = CEO_RENDER[sec]
-        st.session_state.ceo_scope = ceo_field_bar()
+    if sec in NEW_RENDER:  # the new design, the same for every role: Field drop-down on top, Excel-style tables
+        page = NEW_RENDER[sec]
+        st.session_state.ceo_scope = field_bar()
     page()
     with st.sidebar:
         user_box()
