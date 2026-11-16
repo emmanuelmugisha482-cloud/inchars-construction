@@ -1,0 +1,12 @@
+[theme]
+base = "light"
+primaryColor = "#0b6a35"
+baseFontSize = 18
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Poppins:https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&display=swap"
+
+[client]
+toolbarMode = "viewer"
+
+[browser]
+gatherUsageStats = false
