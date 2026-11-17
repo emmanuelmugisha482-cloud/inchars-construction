@@ -8,7 +8,7 @@ Built with Streamlit. Data is stored in PostgreSQL (Neon). Without `DATABASE_URL
 
 A person can have **several roles** and gets the pages of every role they have. The CEO changes roles and fields in
 **Users** (click a name, or choose it from the list); the person gets the new pages the next time they open a page.
-Everybody except the CEO works only on the field(s) the CEO gives them. Funds received are visible to the CEO only.
+Accountant, Store manager and Field manager work only on the field(s) the CEO gives them. Receptionist and Engineer work on services and need no field. Funds received are visible to the CEO only.
 
 | Role | Main pages |
 |---|---|
@@ -16,6 +16,8 @@ Everybody except the CEO works only on the field(s) the CEO gives them. Funds re
 | Accountant | Dashboard (no funds), Expenses, Material requests (approve), Money requests (record payments), Taxes & debts, Import, Categories, Reports |
 | Field manager | Dashboard (no funds), Expenses, Material stock (view), Requests, Reports |
 | Store manager | Dashboard (material stock), Materials received, Materials used, Stock count, Requests |
+| Receptionist | Dashboard (jobs), Jobs (register jobs, customers, payments, hand over documents), Money requests, Money used |
+| Engineer | Dashboard (his or her jobs), Jobs (the jobs given to him or her), Money requests, Money used |
 
 Every user can also ask for materials and for money. Charts are on each person's Dashboard and follow their access.
 
@@ -58,6 +60,45 @@ The same design now runs for the CEO, Accountant, Store manager and Field manage
   and Field manager request. **Money used**: only the CEO records his own; others see what was paid to them.
 - **Reports**: summary first, then a category drop-down that shows that category's sheet. Funds appear for the CEO only.
 
+## Services: jobs for customers (consultancy, house design, building permits)
+
+A separate part of the app, for the Receptionist, Engineer, CEO and Accountant. It is the **Jobs** page.
+
+**The flow**
+1. The **Receptionist** registers the job (customer, service, title, fee, promised date, deposit, the customer's documents). The app gives
+   a job number such as `INC-2026-0001`; the customer keeps it to come back. The **CEO is notified**.
+2. The **CEO** gives the job to an engineer and sets the promised date. The **Engineer is notified**.
+3. The **Engineer** starts the work, can ask the customer for something (the Receptionist is notified), sets the permit stage for
+   building permits (documents collected, submitted to government with the reference number, under review, corrections requested,
+   approved), uploads the finished **PDF** and marks the job **Ready**. The **CEO and the Receptionist are notified**.
+4. When the customer returns, the **Receptionist** finds the job by number, name or phone. The finished document can be opened (and
+   printed from the PDF viewer, Ctrl+P) **only when the job is paid in full**. The Receptionist records any payment, hands over the
+   document and marks the job **Collected**. The CEO can release a document without full payment, but must write the reason.
+
+**Rules**
+- Deposits and part payments are allowed. A payment cannot be more than the balance. Only the CEO can delete a payment.
+- An Engineer sees only his or her own jobs and no money. The Accountant sees jobs and payments but not the documents.
+- Every change is written in the job's **History** (who, when, what). Notifications appear on the Jobs page, with a number on the menu,
+  and are **also sent by email** to every person who has an email address (never to the person who did the action).
+  Emails use the same email settings as the password reset. In Streamlit **Settings > Secrets** keep this block (the app address is
+  optional; it is added to the email):
+
+      app_url = "https://your-app.streamlit.app"
+
+      [smtp]
+      host = "smtp.gmail.com"
+      port = 465
+      user = "your.address@gmail.com"
+      password = "the app password"
+      sender = "Inchars PD Group <your.address@gmail.com>"
+
+  Emails are sent in the background. If the mail server fails, the job action still works and the notice stays on the Jobs page.
+  Each person adds his or her email address at the first login (or the CEO in Users).
+- Statuses: New, Assigned, In progress, Waiting for customer, Ready, Collected, Cancelled. Only the CEO can reopen a closed job.
+- Files are kept in the database, up to 15 MB each (PDF, JPG, PNG for the customer's documents; PDF only for the finished document).
+  If the files become big or many, only `inchars/storage.py` needs to change to use an online file store.
+- The CEO and Accountant dashboards have a **Services** tab; the Receptionist and Engineer dashboards show their own jobs.
+
 ## Where to find what (code map)
 
 `app.py` is only the start file. All the code is in the `inchars/` folder, split by job, so a problem can be found quickly.
@@ -79,6 +120,10 @@ The same design now runs for the CEO, Accountant, Store manager and Field manage
 | Material stock, requests, deliveries | `inchars/pages/stock.py`, `inchars/pages/store.py`, `inchars/pages/material_requests.py` (data: `inchars/data/materials.py`) |
 | Money requests, money used, taxes and debts | `inchars/pages/money_requests.py`, `money_used.py`, `taxes_debts.py` (data: `inchars/data/money.py`) |
 | Reports | `inchars/pages/reports.py` |
+| Jobs for customers: the page, one job, customers, payments | `inchars/pages/jobs.py`, `job_detail.py`, `customers.py`, `job_payments.py` |
+| Jobs dashboards (Receptionist, Engineer, Services tab) | `inchars/pages/jobs_dashboard.py` |
+| Jobs rules (who can do what), notifications, payments | `inchars/data/jobs.py` |
+| Where uploaded files are kept | `inchars/storage.py` |
 | Import from Excel | `inchars/pages/import_costs.py` |
 | Fields & categories, Users | `inchars/pages/setup.py`, `inchars/pages/users.py` |
 
@@ -87,8 +132,9 @@ by several pages. Files only import from the layers below them, so changing a pa
 
 ### Checking a change
 
-After editing, run `python tests/smoke_test.py`. It opens every page for every role on a temporary database and prints OK or FAIL for
-each, in a few seconds, without a browser. It needs only `pandas`. If a page shows an error online, the traceback in Streamlit
+After editing, run `python tests/smoke_test.py` (every page for every role) and `python tests/jobs_workflow_test.py` (the whole job
+flow with its rules and notifications). They run on a temporary database and print OK or FAIL for each check, in a few seconds,
+without a browser. They need only `pandas`. If a page shows an error online, the traceback in Streamlit
 **Manage app** gives the file and line; fix it there, then run the smoke test before uploading.
 
 ## Put it online (free)
