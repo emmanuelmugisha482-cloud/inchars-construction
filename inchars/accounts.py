@@ -91,8 +91,8 @@ def smtp_conf():
     return s if s["host"] and s["user"] and s["password"] else None
 
 
-def send_email(to, subject, body):
-    cfg = smtp_conf()
+def send_email(to, subject, body, cfg=None):
+    cfg = cfg or smtp_conf()
     if not cfg:
         raise RuntimeError("Email is not configured")
     msg = EmailMessage()
