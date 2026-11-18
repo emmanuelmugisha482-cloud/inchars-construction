@@ -77,7 +77,7 @@ def _none(msg="Nothing to show yet."):
 PAD = {"left": 8, "right": 48, "top": 14, "bottom": 8}
 
 
-def c_bar(frame, label, value, horizontal=True, highlight=None, xtitle=None, unit="Frw", key=None, select=False, color=None):
+def c_bar(frame, label, value, horizontal=True, highlight=None, xtitle=None, unit="Frw", key=None, select=False, color=None, fmt=",.0f"):
     """Bars with the value written at the end of each bar. Returns the clicked label when select=True."""
     if frame is None or frame.empty:
         return _none()
@@ -90,7 +90,7 @@ def c_bar(frame, label, value, horizontal=True, highlight=None, xtitle=None, uni
         data = alt.Data(values=_recs(rec, [label, value, "Label", "Hi"]))
         base = alt.Chart(data)
         col = alt.condition("datum.Hi", alt.value("#e0922f"), alt.value(color or "#0b6a35"))
-        tip = [alt.Tooltip(f"{label}:N", title=label), alt.Tooltip(f"{value}:Q", format=",.0f", title=unit)]
+        tip = [alt.Tooltip(f"{label}:N", title=label), alt.Tooltip(f"{value}:Q", format=fmt, title=unit)]
         if horizontal:
             y = alt.Y(f"{label}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260, labelFontSize=12, ticks=False, domain=False))
             x = alt.X(f"{value}:Q", title=xtitle or unit, scale=alt.Scale(domain=[0, top * 1.22], nice=False),
