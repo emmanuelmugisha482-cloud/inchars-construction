@@ -17,12 +17,16 @@ LOGO = os.path.join(BASE_DIR, "assets", "logo.png")
 
 
 CEO, ACCOUNTANT, STORE, FIELD = "CEO", "Accountant", "Store manager", "Field manager"
+RECEPTIONIST, ENGINEER = "Receptionist", "Engineer"  # the services side: consultancy, house design, building permits
 
 
-ROLES = [CEO, ACCOUNTANT, STORE, FIELD]
+CONSTRUCTION_ROLES = [CEO, ACCOUNTANT, STORE, FIELD]
+ROLES = CONSTRUCTION_ROLES + [RECEPTIONIST, ENGINEER]  # every role a user can be given
 
 
-ALL = tuple(ROLES)
+ALL = tuple(CONSTRUCTION_ROLES)  # the construction pages
+EVERYONE = tuple(ROLES)  # pages every user gets (dashboard, money requests, money used)
+FIELD_ROLES = (ACCOUNTANT, STORE, FIELD)  # these roles work on fields, so they need at least one field
 
 
 SEE_ALL = (CEO,)  # only the CEO sees every field; everybody else works on the fields given to them
@@ -75,3 +79,13 @@ MOVE_COLS = ["id", "site_id", "material_id", "Date", "Field", "Material", "Unit"
 # (the CEO may), and the Store manager records the delivery, which adds the quantity to the stock.
 REQ_COLS = ["id", "batch", "site_id", "material_id", "Date", "Field", "Material", "Unit", "Requested", "Approved",
             "Delivered", "Status", "Needed by", "Requested by", "Decided by", "Note", "Reason"]
+
+
+# ---- services (jobs for customers) ----
+SERVICES = ["Consultancy", "House design", "Building permit", "Other"]
+PERMIT = "Building permit"
+JOB_STATUSES = ["New", "Assigned", "In progress", "Waiting for customer", "Ready", "Collected", "Cancelled"]
+OPEN_STATUSES = ["New", "Assigned", "In progress", "Waiting for customer", "Ready"]
+PERMIT_STAGES = ["Documents collected", "Submitted to government", "Under review", "Corrections requested", "Approved"]
+PAY_METHODS = ["Cash", "Mobile money", "Bank transfer", "Other"]
+MAX_FILE_MB = 15  # per file; files are kept in the database (see storage.py to move them to an online file store)

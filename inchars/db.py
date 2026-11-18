@@ -35,6 +35,9 @@ IS_PG = bool(DATABASE_URL)
 PK = "SERIAL PRIMARY KEY" if IS_PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
 
+BLOB = "BYTEA" if IS_PG else "BLOB"
+
+
 IntegrityErrors = (sqlite3.IntegrityError,) + ((psycopg2.IntegrityError,) if psycopg2 else ())
 
 
@@ -171,6 +174,22 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_exp_site ON expenses(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_exp_date ON expenses(spent_on)",
     "CREATE INDEX IF NOT EXISTS idx_funds_site ON funds(site_id)",
+    # ---- services: customers, jobs, payments, files, history, notifications ----
+    f"""CREATE TABLE IF NOT EXISTS customers(
+        id {PK}, name TEXT NOT NULL, phone TEXT, email TEXT, note TEXT, created_at TEXT, created_by TEXT)""",
+    f"""CREATE TABLE IF NOT EXISTS jobs(
+        id {PK}, job_no TEXT UNIQUE NOT NULL, customer_id INTEGER, service TEXT, title TEXT, description TEXT,
+        status TEXT DEFAULT 'New', stage TEXT, gov_ref TEXT, fee BIGINT DEFAULT 0, due_on TEXT, assigned_to TEXT,
+        created_by TEXT, created_at TEXT, ready_at TEXT, collected_at TEXT, collected_by TEXT)""",
+    f"""CREATE TABLE IF NOT EXISTS job_payments(
+        id {PK}, job_id INTEGER, amount BIGINT, method TEXT, reference TEXT, paid_on TEXT, received_by TEXT, note TEXT, created_at TEXT)""",
+    f"""CREATE TABLE IF NOT EXISTS job_files(
+        id {PK}, job_id INTEGER, kind TEXT, filename TEXT, mime TEXT, size BIGINT, uploaded_by TEXT, uploaded_at TEXT)""",
+    f"CREATE TABLE IF NOT EXISTS job_file_data(file_id INTEGER PRIMARY KEY, data {BLOB})",
+    f"""CREATE TABLE IF NOT EXISTS job_events(
+        id {PK}, job_id INTEGER, happened_at TEXT, by_user TEXT, event TEXT, detail TEXT)""",
+    f"""CREATE TABLE IF NOT EXISTS job_notices(
+        id {PK}, job_id INTEGER, to_user TEXT, message TEXT, created_at TEXT, read_at TEXT)""",
 ]
 
 

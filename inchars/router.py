@@ -5,7 +5,7 @@ import streamlit as st
 from inchars.accounts import get_user, has, load_roles, seed_first_manager, users_exist
 from inchars.components.common import show_flash
 from inchars.components.layout import field_bar, header, side_menu, user_box
-from inchars.config import ACCOUNTANT, ALL, CEO, FIELD, STORE
+from inchars.config import ACCOUNTANT, ALL, CEO, ENGINEER, EVERYONE, FIELD, RECEPTIONIST, STORE
 from inchars.data.materials import pending_material_requests
 from inchars.data.money import pending_money_requests
 from inchars.db import init_db
@@ -13,6 +13,8 @@ from inchars.login import LOGO_URI, email_prompt, login
 from inchars.pages.dashboard import dashboard_page
 from inchars.pages.expenses import expenses_page
 from inchars.pages.funds import funds_page
+from inchars.data.jobs import unread_count
+from inchars.pages.jobs import jobs_page
 from inchars.pages.import_costs import page_import
 from inchars.pages.material_requests import matreq_page
 from inchars.pages.money_requests import moneyreq_page
@@ -31,15 +33,16 @@ NEW_RENDER = {"dashboard": dashboard_page, "stock": stock_page, "matreq": matreq
 
 
 PAGE_DEFS = [  # key, label, icon, roles that get the page. A user with several roles gets all their pages.
-    ("dashboard", "Dashboard", "dashboard", ALL),
+    ("dashboard", "Dashboard", "dashboard", EVERYONE),
+    ("jobs", "Jobs", "assignment", (CEO, ACCOUNTANT, RECEPTIONIST, ENGINEER)),
     ("stock", "Material stock", "inventory_2", ALL),
     ("matreq", "Material requests", "shopping_cart", ALL),
     ("receive", "Materials received", "move_to_inbox", (STORE,)),
     ("use", "Materials used", "outbox", (STORE,)),
     ("count", "Stock count", "fact_check", (STORE,)),
     ("expenses", "Expenses", "receipt_long", (CEO, ACCOUNTANT, FIELD)),
-    ("moneyreq", "Money requests", "request_quote", ALL),
-    ("moneyused", "Money used", "account_balance_wallet", ALL),
+    ("moneyreq", "Money requests", "request_quote", EVERYONE),
+    ("moneyused", "Money used", "account_balance_wallet", EVERYONE),
     ("funds", "Funds received", "payments", (CEO,)),
     ("taxdebt", "Taxes & debts", "gavel", (CEO, ACCOUNTANT)),
     ("import", "Import from Excel", "upload_file", (CEO, ACCOUNTANT)),
@@ -50,7 +53,7 @@ PAGE_DEFS = [  # key, label, icon, roles that get the page. A user with several 
 
 
 RENDER = {**NEW_RENDER, "import": page_import, "setup": page_setup, "users": page_users,
-          "receive": page_receive, "use": page_use, "count": page_count, "taxdebt": page_taxdebt}
+          "jobs": jobs_page, "receive": page_receive, "use": page_use, "count": page_count, "taxdebt": page_taxdebt}
 
 
 def allowed_pages():
@@ -88,6 +91,8 @@ def main():
     counts = {}
     if has(CEO, ACCOUNTANT):  # requests waiting for this person
         counts["matreq"], counts["moneyreq"] = pending_material_requests(), pending_money_requests()
+    if has(CEO, ACCOUNTANT, RECEPTIONIST, ENGINEER):  # unread job notifications
+        counts["jobs"] = unread_count()
     sec, title = side_menu(allowed_pages(), counts)
     header(title)
     show_flash()
