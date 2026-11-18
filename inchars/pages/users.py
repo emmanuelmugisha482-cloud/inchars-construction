@@ -12,7 +12,7 @@ from inchars.accounts import (
     set_user_sites,
 )
 from inchars.components.common import K, done, match, search_box, wide
-from inchars.config import CEO, FIELD, ROLES
+from inchars.config import CEO, FIELD, FIELD_ROLES, ROLES
 from inchars.db import df
 
 
@@ -42,18 +42,19 @@ def page_users():
         wide(st.dataframe, view, hide_index=True)
         rows = []
     with st.expander("Add a user"):
-        st.caption("Choose one or more roles. The CEO sees all fields. Every other user needs at least one field.")
+        st.caption("Choose one or more roles. The CEO sees all fields. Accountant, Store manager and Field manager need at least one field. "
+                   "Receptionist and Engineer work on services (jobs for customers) and need no field.")
         a1, a2 = st.columns(2)
         nu = a1.text_input("User name", key=K("nu"))
         nroles = a2.multiselect("Roles", ROLES, default=[FIELD], key=K("nr"))
         ne = a1.text_input("Email (optional, used to reset a forgotten password)", key=K("ne"))
         npw = a2.text_input("Temporary password (at least 8 characters)", type="password", key=K("np"))
-        ns = st.multiselect("Fields this user works on", list(site_ids), key=K("ns")) if nroles and CEO not in nroles else []
+        ns = st.multiselect("Fields this user works on", list(site_ids), key=K("ns")) if nroles and CEO not in nroles and any(r in FIELD_ROLES for r in nroles) else []
         if st.button("Add user"):
             err = None
             if not nroles:
                 err = "Choose at least one role."
-            elif CEO not in nroles and not ns:
+            elif CEO not in nroles and any(r in FIELD_ROLES for r in nroles) and not ns:
                 err = "Choose at least one field for this user." if site_ids else "Create a field first (Fields & categories)."
             err = err or add_user_roles(nu, nroles, ne, npw)
             if err:
@@ -73,19 +74,19 @@ def page_users():
     cur_roles, cur_fields = roles_of.get(uid, []), fields_of.get(uid, [])
     nr = st.multiselect("Roles", ROLES, default=[r for r in cur_roles if r in ROLES], key=K(f"er{uid}"))
     nf = st.multiselect("Fields this user works on", list(site_ids), default=[f for f in cur_fields if f in site_ids],
-                        key=K(f"ef{uid}")) if CEO not in nr else cur_fields
+                        key=K(f"ef{uid}")) if CEO not in nr and any(r in FIELD_ROLES for r in nr) else cur_fields
     if st.button("Save roles and fields"):
         ceos = [i for i, r in roles_of.items() if CEO in r]
         if not nr:
             st.error("Choose at least one role.")
-        elif CEO not in nr and not nf:
-            st.error("A user without the CEO role needs at least one field.")
+        elif CEO not in nr and any(r in FIELD_ROLES for r in nr) and not nf:
+            st.error("An Accountant, Store manager or Field manager needs at least one field.")
         elif uid in ceos and CEO not in nr and len(ceos) <= 1:
             st.error("There must be at least one CEO.")
         else:
             set_user_roles(uid, nr)
             if CEO not in nr:
-                set_user_sites(uid, [site_ids[n] for n in nf])
+                set_user_sites(uid, [site_ids[n] for n in nf] if any(r in FIELD_ROLES for r in nr) else [])
             done(f"Roles and fields saved for {uname}.")
     p1, p2 = st.columns(2)
     pw = p1.text_input("New password (at least 8 characters)", type="password", key=K("wp"))

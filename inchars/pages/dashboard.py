@@ -26,6 +26,7 @@ from inchars.data.materials import load_mat_requests, load_moves, stock_balances
 from inchars.data.money import load_debts, load_ledger, load_money_requests, load_taxes
 from inchars.data.scope import categories_df, no_field_message, visible_sites
 from inchars.db import df
+from inchars.pages.jobs_dashboard import jobs_dashboard, services_tab
 from inchars.styles import DASH_CSS
 
 
@@ -167,7 +168,7 @@ def dash_materials_tab(bal, mv, reqs):
 
 def dashboard_page():
     if not has(CEO, ACCOUNTANT, FIELD):
-        return store_dashboard()
+        return store_dashboard() if has(STORE) else jobs_dashboard()  # Store manager, or Receptionist / Engineer
     user, field = st.session_state.user, st.session_state.get("ceo_field", "All fields")
     sites = visible_sites()
     if sites.empty:
@@ -332,7 +333,7 @@ def dashboard_page():
     # ---- charts ----
     st.markdown('<div class="dsec">Analysis</div><div class="dcap">Hover a chart for the exact value. Click a bar in the category ranking to filter the whole page. '
                 'Every chart has a Download data button.</div>', unsafe_allow_html=True)
-    t_sp, t_fin, t_mat, t_time, t_money, t_act = st.tabs(["Spending", "Financial", "Materials", "Time spent", "Money, taxes & debts" if admin else "Money", "Activity"])
+    t_sp, t_fin, t_mat, t_time, t_money, t_act, t_srv = st.tabs(["Spending", "Financial", "Materials", "Time spent", "Money, taxes & debts" if admin else "Money", "Activity", "Services"])
     metric = "Transactions" if by_count else "Amount"
     unit = "entries" if by_count else "Frw"
 
@@ -539,6 +540,11 @@ def dashboard_page():
                     wide(st.dataframe, dl, hide_index=True)
                 else:
                     st.caption("Nothing due soon.")
+    with t_srv:
+        if has(CEO, ACCOUNTANT):
+            services_tab()
+        else:
+            st.caption("Services are shown to the CEO and the Accountant.")
 
 
 def store_dashboard():
