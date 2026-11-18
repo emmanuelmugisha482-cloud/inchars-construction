@@ -95,6 +95,14 @@ A separate part of the app, for the Receptionist, Engineer, CEO and Accountant. 
   Emails are sent in the background. If the mail server fails, the job action still works and the notice stays on the Jobs page.
   Each person adds his or her email address at the first login (or the CEO in Users).
 - Statuses: New, Assigned, In progress, Waiting for customer, Ready, Collected, Cancelled. Only the CEO can reopen a closed job.
+  The Jobs page shows a count for each status on top, lists the **open jobs** by default, and has a **Refresh** button. A page shows
+  the latest statuses each time it is drawn (when you click something, change page, or press Refresh); it does not change by itself.
+- **The customer is emailed too** (if his or her email address was written when registering, or added later in the job's Actions tab):
+  a thank-you with the job number when the job is registered, then short updates when work starts, when something is needed from
+  the customer, at each building-permit stage, when the document is ready (with the balance to pay) and when it was collected.
+  The job's History shows each "Customer emailed" line.
+- **Receptionist and Engineer money requests** have two categories only: **Office use** and **Personal use**. A paid Personal use
+  request is a personal entry in Money used; Office use is a business entry.
 - Files are kept in the database, up to 15 MB each (PDF, JPG, PNG for the customer's documents; PDF only for the finished document).
   If the files become big or many, only `inchars/storage.py` needs to change to use an online file store.
 - The CEO and Accountant dashboards have a **Services** tab; the Receptionist and Engineer dashboards show their own jobs.
