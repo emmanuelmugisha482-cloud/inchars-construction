@@ -16,6 +16,7 @@ from inchars.data.money import (
     load_money_requests,
     money_cats,
     pay_money_requests,
+    service_only,
     update_money_pending,
 )
 from inchars.data.scope import categories_df, visible_sites
@@ -44,7 +45,7 @@ def money_all(reqs):
         return st.caption("No money requests yet.")
     a, b, c = st.columns([2, 2, 3])
     status = a.radio("Show", ["All", "Pending", "Approved", "Paid", "Rejected"], horizontal=True, key="cmr_st")
-    cat = b.selectbox("Category", ["All categories"] + categories_df().name.tolist(), key="cmr_cat")
+    cat = b.selectbox("Category", ["All categories"] + sorted(set(categories_df().name) | set(reqs.Category.dropna())), key="cmr_cat")
     with c:
         q = search_box("cmr_q", "Search purpose, category or person", "Type part of a word…")
     view = reqs if status == "All" else reqs[reqs.Status == status]
@@ -111,10 +112,15 @@ def money_new_block(sites, reqs, user):
     st.subheader("New money request")
     st.caption("Ask the CEO for money, for example for fuel, transport, tools or materials.")
     fc = field_choices(sites)
-    a1, a2, a3 = st.columns(3)
-    field = a1.selectbox("Field", list(fc), key=K("mf"))
-    cat = a2.selectbox("Category", money_cats(), key=K("mc"))
-    newcat = a3.text_input("or a new category", key=K("mn"))
+    if service_only():  # Receptionist / Engineer: no field, and only Office use or Personal use
+        st.caption("Choose Office use for things the office needs, or Personal use for yourself.")
+        field, newcat = "(no field)", ""
+        cat = st.selectbox("Category", money_cats(), key=K("mc"))
+    else:
+        a1, a2, a3 = st.columns(3)
+        field = a1.selectbox("Field", list(fc), key=K("mf"))
+        cat = a2.selectbox("Category", money_cats(), key=K("mc"))
+        newcat = a3.text_input("or a new category", key=K("mn"))
     b1, b2, b3 = st.columns([1, 2, 1])
     amount = b1.number_input("Amount (Frw)", min_value=1, step=1000, value=None, placeholder="Enter amount", key=K("ma"))
     purpose = b2.text_input("What is it for?", key=K("mp"))

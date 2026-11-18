@@ -9,9 +9,9 @@ from inchars.accounts import has
 from inchars.components.common import K, done, pretty, wide
 from inchars.components.kpi import kpi, kpi_grid
 from inchars.components.sheets import download_sheet, sheet_number
-from inchars.config import ACCOUNTANT, CEO, ENGINEER, PAY_METHODS, PERMIT, PERMIT_STAGES, RECEPTIONIST
+from inchars.config import ACCOUNTANT, CEO, ENGINEER, OPEN_STATUSES, PAY_METHODS, PERMIT, PERMIT_STAGES, RECEPTIONIST
 from inchars.data.jobs import (add_files, add_note, add_payment, assign_job, can, can_open_deliverable, change_status, delete_payment,
-                               edit_job, load_engineers, load_events, load_jobs, load_payments, remove_file, set_stage)
+                               edit_job, load_engineers, load_events, load_jobs, load_payments, remove_file, save_customer_email, set_stage)
 from inchars.storage import list_files, read_file
 
 TONE = {"New": "amber", "Assigned": "blue", "In progress": "blue", "Waiting for customer": "amber", "Ready": "green",
@@ -34,7 +34,7 @@ def job_detail(job_id):
     j = rows.iloc[0]
     money = has(CEO, ACCOUNTANT, RECEPTIONIST)
     st.markdown(f"### {j.job_no} · {j.title}")
-    st.caption(f"{j.service} · {j.customer} · {j.phone}")
+    st.caption(f"{j.service} · {j.customer} · {j.phone} · " + (j.customer_email if j.customer_email else "no email address"))
     cards = [kpi("Status", j.status, "stage: " + str(j.stage) if j.stage else "where the job is now", TONE.get(j.status, "grey")),
              kpi("Engineer", j.assigned_to or "not assigned", "doing the work", "blue" if j.assigned_to else "amber", small=True),
              kpi("Promised date", j.due_on or "-", "overdue" if j.overdue else "date given to the customer", "red" if j.overdue else "grey")]
@@ -144,6 +144,11 @@ def actions_tab(j, n_del):
             due = b.date_input("Promised date", date.fromisoformat(j.due_on) if j.due_on else date.today(), key=K("eD" + k))
             if st.button("Save changes", key=K("eb" + k)):
                 _msg(edit_job(jid, title, desc, fee, due), "Changes saved.")
+    if has(CEO, RECEPTIONIST) and j.status in OPEN_STATUSES:
+        with st.expander("Customer's email address (progress updates are sent there)"):
+            mail = st.text_input("Email", value=j.customer_email or "", key=K("ce" + k))
+            if st.button("Save the email", key=K("ceb" + k)):
+                _msg(save_customer_email(int(j.customer_id), mail), "Email saved.")
     if can("cancel", j):
         with st.expander("Cancel the job"):
             why = st.text_input("Reason for cancelling", key=K("cr" + k))

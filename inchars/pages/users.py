@@ -37,7 +37,7 @@ def page_users():
     st.caption("Click a row to edit that user, or choose the user from the list below the table.")
     try:
         ev = wide(st.dataframe, view, hide_index=True, on_select="rerun", selection_mode="single-row", key="users_tbl")
-        rows = list(ev.selection.rows) if ev is not None else []
+        rows = [r for r in (ev.selection.rows if ev is not None else []) if r < len(view)]  # a row that is no longer in the list is ignored
     except TypeError:  # an older Streamlit without row selection: the list below is used
         wide(st.dataframe, view, hide_index=True)
         rows = []

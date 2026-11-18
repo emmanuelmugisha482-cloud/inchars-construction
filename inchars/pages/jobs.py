@@ -6,6 +6,7 @@ import streamlit as st
 
 from inchars.accounts import has
 from inchars.components.common import K, done, match, pretty, search_box, to_excel, wide
+from inchars.components.kpi import kpi, kpi_grid
 from inchars.config import ACCOUNTANT, CEO, JOB_STATUSES, OPEN_STATUSES, PAY_METHODS, RECEPTIONIST, SERVICES, XLSX
 from inchars.data.jobs import (create_job, email_state, load_customers, load_jobs, load_notices, mark_notices_read, save_customer,
                                sees_all_jobs, unread_count)
@@ -45,11 +46,24 @@ def jobs_tab():
     if jobs.empty:
         return st.info("There are no jobs yet." if sees_all_jobs() else "No job has been given to you yet.")
     money = has(CEO, ACCOUNTANT, RECEPTIONIST)
-    a, b, c = st.columns([2, 2, 3])
-    show = a.selectbox("Show", ["Needs my attention", "All jobs", "Open jobs"] + JOB_STATUSES, key="jb_show")
+    counts = {s: int((jobs.status == s).sum()) for s in ("New", "Assigned", "In progress", "Waiting for customer", "Ready")}
+    late = int(jobs.overdue.sum())
+    kpi_grid([kpi("New", counts["New"], "waiting for an engineer", "amber" if counts["New"] else "grey"),
+              kpi("Assigned", counts["Assigned"], "given, not started", "blue"),
+              kpi("In progress", counts["In progress"], "being worked on", "blue"),
+              kpi("Waiting for customer", counts["Waiting for customer"], "needs something from the customer", "amber" if counts["Waiting for customer"] else "grey"),
+              kpi("Ready", counts["Ready"], "finished, to hand over", "green"),
+              kpi("Overdue", late, "past the promised date", "red" if late else "grey")])
+    a, b, c, r = st.columns([2, 2, 3, 1])
+    show = a.selectbox("Show", ["Open jobs", "Needs my attention", "All jobs"] + JOB_STATUSES, key="jb_show")
     service = b.selectbox("Service", ["All services"] + SERVICES, key="jb_service")
     with c:
         q = search_box("jb_q", "Search job number, customer, phone or title", "Type part of a word…")
+    r.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+    r.button(":material/refresh: Refresh", key="jb_refresh")  # the page shows the latest statuses every time it is drawn
+    n_att = int(attention(jobs).sum())
+    if n_att:
+        st.caption(f"{n_att} job(s) need your attention now (choose 'Needs my attention' in Show).")
     view = jobs
     if show == "Needs my attention":
         view = view[attention(view)]
@@ -80,6 +94,7 @@ def jobs_tab():
         st.download_button(":material/download: Download Excel", to_excel({"Jobs": table}), f"jobs_{date.today()}.xlsx", mime=XLSX, key="dl_jobs")
     labels = {f"{r.job_no} · {r.customer} · {r.title} · {r.status}": int(r.id) for r in view.itertuples()}
     chosen = st.selectbox("Open a job", list(labels), index=None, placeholder="Search and choose a job", key=K("jb_pick"))
+    rows = [r_ for r_ in rows if r_ < len(view)]  # a row that is no longer in the list (the list changed) is ignored
     if rows:
         st.session_state.job_open = int(view.id.iloc[rows[0]])
     elif chosen:
@@ -105,7 +120,7 @@ def new_job_tab():
     else:
         a, b = st.columns(2)
         new = {"name": a.text_input("Name", key=K("nj_n")), "phone": b.text_input("Phone", key=K("nj_p")),
-               "email": a.text_input("Email (optional)", key=K("nj_e")), "note": b.text_input("Note (optional)", key=K("nj_o"))}
+               "email": a.text_input("Email (the customer gets progress updates here)", key=K("nj_e")), "note": b.text_input("Note (optional)", key=K("nj_o"))}
     a, b = st.columns(2)
     service = a.selectbox("Service", SERVICES, key=K("nj_s"))
     title = b.text_input("Title", placeholder="For example: 3-bedroom house design, Kicukiro", key=K("nj_t"))
