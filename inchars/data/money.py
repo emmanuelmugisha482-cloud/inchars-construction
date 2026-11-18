@@ -5,13 +5,21 @@ from datetime import date, datetime, timedelta
 import streamlit as st
 
 from inchars.accounts import has
-from inchars.config import ACCOUNTANT, CEO
+from inchars.config import ACCOUNTANT, CEO, FIELD, OFFICE_USE, PERSONAL_USE, STORE
 from inchars.data.scope import categories_df
 from inchars.db import Abort, conn, df, ensure_named
 
 
+def service_only():
+    """True for a Receptionist or Engineer who has no construction role."""
+    return not has(CEO, ACCOUNTANT, STORE, FIELD)
+
+
 def money_cats():
-    """Money requests and money used use the SAME categories as the expenses / Excel workbook."""
+    """Money requests and money used use the SAME categories as the expenses / Excel workbook.
+    The Receptionist and the Engineer choose between Office use and Personal use."""
+    if service_only():
+        return [OFFICE_USE, PERSONAL_USE]
     return categories_df().name.tolist()
 
 
@@ -83,7 +91,7 @@ def pay_money_requests(ids, user):
                 continue  # nobody records the payment of their own request
             c.execute("UPDATE money_requests SET status='Paid', paid_on=?, paid_by=? WHERE id=?", (str(date.today()), user, rid))
             c.execute("INSERT INTO money_ledger(spent_on, person, site_id, kind, category, amount, note, request_id, entered_by, entered_at) "
-                      "VALUES(?,?,?,?,?,?,?,?,?,?)", (str(date.today()), r["requested_by"], r["site_id"], "Business", r["category"],
+                      "VALUES(?,?,?,?,?,?,?,?,?,?)", (str(date.today()), r["requested_by"], r["site_id"], "Personal" if r["category"] == PERSONAL_USE else "Business", r["category"],
                                                       r["amount_approved"], r["purpose"], rid, user, now))
             n += 1
     return n

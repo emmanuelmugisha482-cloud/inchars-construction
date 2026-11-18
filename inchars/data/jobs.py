@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from inchars.accounts import has, send_email, smtp_conf
-from inchars.config import (ACCOUNTANT, CEO, ENGINEER, JOB_STATUSES, OPEN_STATUSES, PAY_METHODS, PERMIT, PERMIT_STAGES,
+from inchars.config import (ACCOUNTANT, CEO, EMAIL_RE, ENGINEER, JOB_STATUSES, OPEN_STATUSES, PAY_METHODS, PERMIT, PERMIT_STAGES,
                             RECEPTIONIST, SERVICES)
 from inchars.db import IntegrityErrors, conn, df
 from inchars.storage import DOCUMENT_TYPES, PDF_ONLY, delete_file, list_files, save_file
@@ -126,6 +126,19 @@ def notify(c, job_id, users, message):
     email_users(c, people, message)
 
 
+def tell_customer(c, job_id, subject, text):
+    """A short, friendly email to the customer about his or her job (only when the customer has an email address and email is set up)."""
+    cfg = smtp_conf()
+    if not cfg:
+        return
+    r = c.execute("SELECT cu.name, cu.email, j.job_no FROM jobs j JOIN customers cu ON cu.id=j.customer_id WHERE j.id=?", (int(job_id),)).fetchone()
+    if not r or not (r["email"] or "").strip():
+        return
+    body = f"Dear {r['name']},\n\n{text}\n\nKind regards,\nInchars PD Group"
+    threading.Thread(target=_send_all, args=(cfg, [r["email"].strip()], f"Inchars PD Group - job {r['job_no']}: {subject}", body), daemon=True).start()
+    log_event(c, job_id, "Customer emailed", subject)
+
+
 def email_state():
     """For the Jobs page: a short line telling this person whether the notifications also reach his or her email."""
     if not smtp_conf():
@@ -173,6 +186,8 @@ def save_customer(name, phone, email, note, customer_id=None):
         return None, "Write the customer's name."
     if len(_digits(phone)) < 7:
         return None, "Write the customer's phone number (at least 7 digits)."
+    if (email or "").strip() and not EMAIL_RE.match((email or "").strip()):
+        return None, "The customer's email address is not valid."
     with conn() as c:
         for r in c.execute("SELECT id, name, phone FROM customers").fetchall():
             if _digits(r["phone"]) == _digits(phone) and r["id"] != customer_id:
@@ -190,12 +205,13 @@ def load_jobs():
     """Every job the signed-in person may see, with the customer and the money (fee, paid, balance)."""
     j = df("""SELECT j.id, j.job_no, j.created_at, j.service, j.title, j.description, j.status, j.stage, j.gov_ref, j.fee, j.due_on,
               j.assigned_to, j.created_by, j.ready_at, j.collected_at, j.collected_by, c.id AS customer_id, c.name AS customer, c.phone AS phone,
+              c.email AS customer_email,
               COALESCE((SELECT SUM(p.amount) FROM job_payments p WHERE p.job_id=j.id), 0) AS paid
               FROM jobs j JOIN customers c ON c.id=j.customer_id ORDER BY j.id DESC""")
     if not sees_all_jobs():
         j = j[j.assigned_to == st.session_state.user]
     j = j.reset_index(drop=True)
-    for col in ("description", "stage", "gov_ref", "due_on", "assigned_to", "ready_at", "collected_at", "collected_by"):
+    for col in ("description", "stage", "gov_ref", "due_on", "assigned_to", "ready_at", "collected_at", "collected_by", "customer_email"):
         j[col] = j[col].fillna("")  # empty text instead of None, so the screens can test it simply
     j["fee"] = pd.to_numeric(j.fee).fillna(0)
     j["paid"] = pd.to_numeric(j.paid).fillna(0)
@@ -246,6 +262,13 @@ def create_job(customer_id, service, title, description, fee, due_on, deposit=0,
                               (jid, deposit, method, (reference or "").strip(), str(date.today()), me, "Deposit", now()))
                     log_event(c, jid, "Payment", f"Deposit {deposit:,} Frw ({method}).")
                 notify(c, jid, usernames_with_role(c, CEO), f"New job {job_no}: {service} for {cust['name']}. It needs an engineer.")
+                tell_customer(c, jid, "thank you for choosing us",
+                              f"Thank you for choosing to work with Inchars PD Group.\n\nWe have registered your job:\n"
+                              f"  Job number: {job_no}\n  Service: {service}\n  Title: {title.strip()}\n"
+                              + (f"  Promised date: {due_on}\n" if due_on else "")
+                              + (f"  Deposit received: {deposit:,} Frw\n" if deposit else "")
+                              + "\nPlease keep your job number: you will need it when you come to collect your document.\n"
+                              "We will keep you informed of our progress by email."),
             break
         except IntegrityErrors:
             job_no = None  # the number was taken at the same moment: try the next one
@@ -307,12 +330,14 @@ def change_status(job_id, action, note="", override=False):
         if action == "start":
             c.execute("UPDATE jobs SET status='In progress' WHERE id=?", (int(job_id),))
             log_event(c, job_id, "Started work")
+            tell_customer(c, job_id, "work has started", f"Work has started on your job {no} ({j['title']}). We will keep you informed of our progress.")
         elif action == "wait":
             if not note:
                 return "Write what you need from the customer."
             c.execute("UPDATE jobs SET status='Waiting for customer' WHERE id=?", (int(job_id),))
             log_event(c, job_id, "Waiting for customer", note)
             notify(c, job_id, recs + ceos, f"Job {no} ({cust}) is waiting for the customer: {note}")
+            tell_customer(c, job_id, "we need something from you", f"To continue with your job {no} ({j['title']}) we need the following from you:\n  {note}\n\nPlease bring it to our office or contact us. Thank you.")
         elif action == "resume":
             c.execute("UPDATE jobs SET status='In progress' WHERE id=?", (int(job_id),))
             log_event(c, job_id, "Work continues", note or "The customer answered.")
@@ -323,6 +348,9 @@ def change_status(job_id, action, note="", override=False):
             paid = "paid in full" if j["balance"] <= 0 else f"balance to pay: {j['balance']:,.0f} Frw"
             log_event(c, job_id, "Ready", note or "The finished document was uploaded.")
             notify(c, job_id, ceos + recs, f"Job {no} ({cust}) is READY for the customer - {paid}.")
+            tell_customer(c, job_id, "your document is ready",
+                          f"Good news: your document for job {no} ({j['title']}) is ready.\nPlease come to our office with your job number {no}."
+                          + (f"\nBalance to pay before we hand it over: {j['balance']:,.0f} Frw." if j["balance"] > 0 else "\nYour job is paid in full."))
         elif action == "collect":
             if j["balance"] > 0 and not (has(CEO) and override):
                 return f"The job is not paid in full: {j['balance']:,.0f} Frw is still to pay."
@@ -331,6 +359,7 @@ def change_status(job_id, action, note="", override=False):
             c.execute("UPDATE jobs SET status='Collected', collected_at=?, collected_by=? WHERE id=?", (now(), me, int(job_id)))
             log_event(c, job_id, "Collected by the customer", ("Released with " + f"{j['balance']:,.0f} Frw unpaid: " + note) if j["balance"] > 0 else (note or "Paid in full."))
             notify(c, job_id, ceos, f"Job {no} ({cust}) was collected by the customer.")
+            tell_customer(c, job_id, "thank you", f"Thank you for collecting your document for job {no} ({j['title']}). It was a pleasure to work with you.")
         elif action == "cancel":
             if not note:
                 return "Write the reason for cancelling."
@@ -357,6 +386,8 @@ def set_stage(job_id, stage, gov_ref=""):
             return "Choose the stage."
         c.execute("UPDATE jobs SET stage=?, gov_ref=? WHERE id=?", (stage, (gov_ref or "").strip() or j["gov_ref"], int(job_id)))
         log_event(c, job_id, f"Permit stage: {stage}", (f"Reference {gov_ref.strip()}" if (gov_ref or "").strip() else ""))
+        tell_customer(c, job_id, f"permit update: {stage}", f"Update on your building permit (job {j['job_no']}): {stage}."
+                      + (f"\nGovernment reference number: {(gov_ref or '').strip() or j['gov_ref']}." if (gov_ref or "").strip() or j["gov_ref"] else ""))
         if stage in ("Approved", "Corrections requested"):
             notify(c, job_id, usernames_with_role(c, CEO) + usernames_with_role(c, RECEPTIONIST), f"Job {j['job_no']} ({j['customer']}): permit stage is now {stage}.")
     return None
@@ -475,4 +506,16 @@ def remove_file(job_id, file_id):
             return "You cannot remove this file."
         log_event(c, job_id, "File removed", f["filename"])
     delete_file(file_id)
+    return None
+
+
+def save_customer_email(customer_id, email):
+    """Add or change the email address of a customer (the CEO or the Receptionist)."""
+    if not has(CEO, RECEPTIONIST):
+        return "You cannot change the customer's email."
+    email = (email or "").strip()
+    if email and not EMAIL_RE.match(email):
+        return "The email address is not valid."
+    with conn() as c:
+        c.execute("UPDATE customers SET email=? WHERE id=?", (email, int(customer_id)))
     return None
