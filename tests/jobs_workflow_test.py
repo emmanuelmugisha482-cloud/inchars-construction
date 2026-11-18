@@ -39,7 +39,9 @@ def job(no):
 
 # ---- 1. the Receptionist registers a job ----
 sign_in("rec")
-cid, err = app.save_customer("Mukamana Alice", "0788 111 222", "", "")
+bad_id, err = app.save_customer("Mukamana Alice", "0788 111 222", "not-an-email", "")
+check("an invalid customer email is refused", bad_id is None and "not valid" in err)
+cid, err = app.save_customer("Mukamana Alice", "0788 111 222", "alice@example.rw", "")
 check("receptionist adds a customer", cid and not err, err)
 dup, err = app.save_customer("Someone else", "0788111222", "", "")
 check("same phone number is refused", dup is None and "already" in err)
@@ -48,6 +50,10 @@ check("deposit above the fee is refused", no is None, err)
 no, err = app.create_job(cid, "House design", "3-bedroom house, Kicukiro", "Plot 12", 600000, "2026-12-10", deposit=200000, method="Mobile money",
                          files=[("land_title.pdf", PDF)])
 check("job registered with a job number", bool(no) and no.startswith("INC-") and not err, err)
+mails_to = lambda who: [(sub, body) for t, sub, body in sent if t == who]
+check("the customer gets a thank-you email with the job number", any("thank you for choosing us" in sub and no in sub and "Thank you for choosing to work with Inchars" in body
+                                                                    and no in body and "keep you informed" in body for sub, body in mails_to("alice@example.rw")))
+check("the thank-you mentions the deposit", any("200,000 Frw" in body for _, body in mails_to("alice@example.rw")))
 j = job(no); jid = int(j.id)
 check("new job has status New and the deposit is recorded", j.status == "New" and int(app.load_payments(jid).amount.sum()) == 200000)
 check("customer document was kept", len(app.list_files(jid)) == 1 and app.read_file(int(app.list_files(jid).id.iloc[0])) == PDF)
@@ -82,6 +88,9 @@ check("a Word file is refused as the finished document", "only PDF" in (app.add_
 check("a fake PDF is refused", "not a real PDF" in (app.add_files(jid, "Deliverable", [("plan.pdf", b"hello")]) or ""))
 check("engineer uploads the finished PDF", app.add_files(jid, "Deliverable", [("house_plan.pdf", PDF)]) is None)
 check("engineer marks the job ready", app.change_status(jid, "ready", "Plans attached") is None and job(no).status == "Ready")
+check("the customer is told work started", any("work has started" in sub for sub, _ in mails_to("alice@example.rw")))
+check("the customer is told what is needed", any("Copy of the ID card" in body for _, body in mails_to("alice@example.rw")))
+check("the customer is told the document is ready, with the balance", any("is ready" in body and "400,000 Frw" in body for _, body in mails_to("alice@example.rw")))
 sign_in("ceo")
 check("CEO is told the job is ready", any("READY" in m for m in app.load_notices().Message))
 sign_in("rec")
@@ -101,6 +110,8 @@ check("receptionist records the rest of the payment", app.add_payment(jid, 40000
 row = app.load_jobs().query("id == @jid").iloc[0]
 check("now paid in full and the document opens", row.balance == 0 and app.can_open_deliverable(row))
 check("receptionist hands over the document", app.change_status(jid, "collect") is None and job(no).status == "Collected")
+check("the customer gets a thank-you after collecting", any("Thank you for collecting" in body for _, body in mails_to("alice@example.rw")))
+check("the history shows that the customer was emailed", (app.load_events(jid).What == "Customer emailed").sum() >= 4)
 check("collected date and person are kept", bool(job(no).collected_at) and job(no).collected_by == "rec")
 sign_in("ceo")
 check("CEO is told it was collected", any("collected" in m for m in app.load_notices().Message))
@@ -110,7 +121,11 @@ check("only the CEO can reopen", app.change_status(jid, "reopen", "Customer want
 # ---- 5. release without payment (CEO only) ----
 sign_in("rec")
 cid2, _ = app.save_customer("Habimana Eric", "0722 333 444", "", "")
+mark = len(sent)
 no2, _ = app.create_job(cid2, "Consultancy", "Soil advice", "", 100000, "2026-12-01")
+check("a customer without an email address is not emailed (only the CEO is)", all(t == "c@x.rw" for t, _, _ in sent[mark:]) and len(sent) > mark)
+check("the email address can be added later and is checked", app.save_customer_email(cid2, "nope") == "The email address is not valid."
+      and app.save_customer_email(cid2, "eric@example.rw") is None)
 j2 = int(job(no2).id)
 sign_in("ceo"); app.assign_job(j2, "eng", "2026-12-01")
 sign_in("eng"); app.change_status(j2, "start"); app.add_files(j2, "Deliverable", [("advice.pdf", PDF)]); app.change_status(j2, "ready")
@@ -158,6 +173,45 @@ app.assign_job(j3, "eng", "2026-12-23")
 sign_in("eng")
 st.session_state.job_open = None
 check("the notifications panel shows the email line", "also sent to eng@x.rw" in show_page("jobs"))
+
+# ---- 6c. money requests of the Receptionist: Office use / Personal use ----
+sign_in("rec")
+check("the Receptionist can choose only Office use or Personal use", app.money_cats() == ["Office use", "Personal use"])
+sign_in("ceo")
+check("the CEO still sees the workbook categories", "Office use" not in app.money_cats() and len(app.money_cats()) > 5)
+sign_in("rec")
+rid1 = app.create_money_request(None, "Office use", "", "Printer paper", 20000, "2026-12-01", "rec")
+rid2 = app.create_money_request(None, "Personal use", "", "Airtime", 5000, "2026-12-01", "rec")
+reqs = app.df("SELECT id, category FROM money_requests WHERE requested_by='rec'")
+ids = dict(zip(reqs.category, reqs.id))
+sign_in("ceo")
+check("CEO approves both", app.decide_money_requests({int(ids["Office use"]): (20000, ""), int(ids["Personal use"]): (5000, "")}, "ceo") in (None, ""))
+check("CEO records the payments", app.pay_money_requests([int(ids["Office use"]), int(ids["Personal use"])], "ceo") == 2)
+kinds = app.df("SELECT category, kind FROM money_ledger WHERE person='rec'")
+check("Office use is a business entry and Personal use a personal entry", dict(zip(kinds.category, kinds.kind)) == {"Office use": "Business", "Personal use": "Personal"}, kinds.to_dict("records"))
+check("these two names were not added to the workbook categories", "Office use" not in app.categories_df().name.tolist())
+sign_in("rec")
+st.session_state.job_open = None
+show_page("moneyreq"); show_page("moneyused")
+sign_in("ceo")
+show_page("moneyreq"); show_page("moneyused")
+check("the money pages draw with these categories", True)
+
+# ---- 6d. the crash from the screenshot: a row was selected, then the list became empty ----
+sign_in("ceo")
+fake = types.SimpleNamespace(selection=types.SimpleNamespace(rows=[0]))
+stub.STClass.dataframe = lambda self, *a, **k: fake
+OVERRIDE.clear(); OVERRIDE["jb_show"] = "Cancelled"
+try:
+    show_page("jobs")
+    check("a selected row that is no longer in the list does not crash the Jobs page", True)
+except IndexError:
+    check("a selected row that is no longer in the list does not crash the Jobs page", False)
+OVERRIDE.clear()
+del stub.STClass.dataframe
+sign_in("rec")
+txt = show_page("jobs")
+check("the Receptionist sees the open jobs by default, with status counts", "Waiting for customer" in txt and "In progress" in txt)
 
 # ---- 7. money and files rules ----
 sign_in("acc")
