@@ -5,9 +5,12 @@ from datetime import date, datetime, timedelta
 import streamlit as st
 
 from inchars.accounts import has
-from inchars.config import ACCOUNTANT, CEO, FIELD, OFFICE_USE, PERSONAL_USE, STORE
+from inchars.config import ACCOUNTANT, CEO, FIELD, STORE
 from inchars.data.scope import categories_df
 from inchars.db import Abort, conn, df, ensure_named
+
+
+OFFICE_USE, PERSONAL_USE = "Office use", "Personal use"  # the only two categories a Receptionist or Engineer can choose
 
 
 def service_only():
