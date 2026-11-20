@@ -6,7 +6,7 @@ import pandas as pd
 PRESS, OVERRIDE, EDITORS, LOG = set(), {}, {}, []
 CLICK = {}
 
-class Rerun(Exception): pass
+class Rerun(BaseException): pass  # like Streamlit's own rerun signal: ordinary 'except Exception' does not catch it
 
 class SS(dict):
     def __getattr__(self, k):
@@ -58,6 +58,9 @@ class STClass(W):
     def text_area(self, label, value="", key=None, **k): return self._o(label, key, value)
     def multiselect(self, label, options=(), default=None, key=None, **k): return self._o(label, key, list(default or []))
     def file_uploader(self, label, key=None, **k): return self._o(label, key, [])
+    def pills(self, label, options=(), selection_mode="single", default=None, key=None, **k):
+        d = list(default or []) if selection_mode == "multi" else default
+        return self._o(label, key, d)
     def checkbox(self, label, value=False, key=None, **k): return self._o(label, key, value)
     def button(self, label, key=None, **k): return (key in PRESS) or (label in PRESS)
     def download_button(self, label, data, *a, **k):
@@ -73,6 +76,8 @@ class STClass(W):
         LOG.append(("chart",)); import types as _t; return _t.SimpleNamespace(selection=CLICK.get('sel', {}))
     def markdown(self, t, *a, **k): LOG.append(("md", str(t)))
     def write(self, *a, **k): pass
+    def error(self, t, *a, **k): LOG.append(("error", str(t)))
+    def warning(self, t, *a, **k): LOG.append(("warning", str(t)))
     def caption(self, t, *a, **k): LOG.append(("caption", str(t)))
     def stop(self): raise Rerun()
 

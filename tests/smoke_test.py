@@ -18,11 +18,11 @@ for uname, (uid, role) in users.items():
         for key in pages:
             st.session_state.ceo_field = field
             st.session_state.ceo_scope = None
-            if key in app.NEW_RENDER:
+            if app.PAGES[key][2]:
                 st.session_state.ceo_scope = app.field_bar()
             LOG.clear()
             try:
-                app.RENDER[key]()
+                app.load_page(key)()
                 broken = [l for l in LOG if l[0] == "caption" and "could not be drawn" in l[1]]
                 print("OK  " if not broken else "WARN", key, field, "(a chart could not be drawn)" if broken else "")
             except stub.Rerun:

@@ -84,11 +84,11 @@ def show_page(key, field="All fields"):
     """Draw one page the way the router does. Returns everything the page wrote as text."""
     st.session_state.ceo_field = field
     st.session_state.ceo_scope = None
-    if key in app.NEW_RENDER:
+    if app.PAGES[key][2]:
         st.session_state.ceo_scope = app.field_bar()
     LOG.clear()
     try:
-        app.RENDER[key]()
+        app.load_page(key)()
     except stub.Rerun:
         pass
     return " ".join(str(l[1]) for l in LOG if l[0] in ("md", "metric", "caption"))
