@@ -174,7 +174,10 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_exp_site ON expenses(site_id)",
     "CREATE INDEX IF NOT EXISTS idx_exp_date ON expenses(spent_on)",
     "CREATE INDEX IF NOT EXISTS idx_funds_site ON funds(site_id)",
-    # ---- services: customers, jobs, payments, files, history, notifications ----
+]
+
+
+SERVICES_SCHEMA = [  # the services side (customers, jobs, payments, files, history, notifications): created separately, see init_db
     f"""CREATE TABLE IF NOT EXISTS customers(
         id {PK}, name TEXT NOT NULL, phone TEXT, email TEXT, note TEXT, created_at TEXT, created_by TEXT)""",
     f"""CREATE TABLE IF NOT EXISTS jobs(
@@ -217,6 +220,16 @@ def init_db():
                     pass  # column already there
         # users made before several roles existed keep their one role
         c.execute("INSERT INTO user_roles(user_id, role) SELECT id, role FROM users WHERE id NOT IN (SELECT user_id FROM user_roles)")
+    try:  # the services tables: if this fails, the construction pages still work (the Jobs page will say so)
+        with conn() as c:
+            if IS_PG:
+                c.execute(";\n".join(SERVICES_SCHEMA))
+            else:
+                for t in SERVICES_SCHEMA:
+                    c.execute(t)
+    except Exception:  # noqa: BLE001
+        import traceback
+        traceback.print_exc()
 
 
 def bulk_insert(c, table, cols, data, chunk=50):
