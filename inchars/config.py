@@ -81,6 +81,10 @@ REQ_COLS = ["id", "batch", "site_id", "material_id", "Date", "Field", "Material"
             "Delivered", "Status", "Needed by", "Requested by", "Decided by", "Note", "Reason"]
 
 
+# ---- money requests of the services staff ----
+OFFICE_USE, PERSONAL_USE = "Office use", "Personal use"  # the only two categories a Receptionist or Engineer can choose
+
+
 # ---- services (jobs for customers) ----
 SERVICES = ["Consultancy", "House design", "Building permit", "Other"]
 PERMIT = "Building permit"
