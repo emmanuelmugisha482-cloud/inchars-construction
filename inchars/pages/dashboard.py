@@ -1,7 +1,9 @@
 """Dashboards: the financial dashboard (CEO, Accountant, Field manager) and the stock dashboard (Store manager)."""
 
-from datetime import date, datetime, timedelta
 import html
+import importlib
+import traceback
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -26,8 +28,21 @@ from inchars.data.materials import load_mat_requests, load_moves, stock_balances
 from inchars.data.money import load_debts, load_ledger, load_money_requests, load_taxes
 from inchars.data.scope import categories_df, no_field_message, visible_sites
 from inchars.db import df
-from inchars.pages.jobs_dashboard import jobs_dashboard, services_tab
 from inchars.styles import DASH_CSS
+
+
+def services_part(name):
+    """The services dashboard (jobs) is loaded here only when needed. If it is broken, only this part shows a message."""
+    try:
+        fn = getattr(importlib.import_module("inchars.services.dashboard"), name)
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        return st.error(f"The services dashboard cannot start ({type(e).__name__}). The rest of the dashboard works. Open System check.")
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        st.error(f"The services dashboard stopped with an error ({type(e).__name__}). The rest of the dashboard works.")
 
 
 def dash_alerts(sites, exp, fnd, bal, mr, reqs, debts):
@@ -168,7 +183,7 @@ def dash_materials_tab(bal, mv, reqs):
 
 def dashboard_page():
     if not has(CEO, ACCOUNTANT, FIELD):
-        return store_dashboard() if has(STORE) else jobs_dashboard()  # Store manager, or Receptionist / Engineer
+        return store_dashboard() if has(STORE) else services_part("jobs_dashboard")  # Store manager, or Receptionist / Engineer
     user, field = st.session_state.user, st.session_state.get("ceo_field", "All fields")
     sites = visible_sites()
     if sites.empty:
@@ -542,7 +557,7 @@ def dashboard_page():
                     st.caption("Nothing due soon.")
     with t_srv:
         if has(CEO, ACCOUNTANT):
-            services_tab()
+            services_part("services_tab")
         else:
             st.caption("Services are shown to the CEO and the Accountant.")
 
