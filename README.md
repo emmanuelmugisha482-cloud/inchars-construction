@@ -62,26 +62,45 @@ The same design now runs for the CEO, Accountant, Store manager and Field manage
 
 ## Services: jobs for customers (consultancy, house design, building permits)
 
-A separate part of the app, for the Receptionist, Engineer, CEO and Accountant. It is the **Jobs** page.
+The **Jobs** page is for the Receptionist, Engineer, CEO and Accountant. Its purpose is to keep everybody informed, easily:
+the customer, the Receptionist, the CEO and the Engineer.
 
-**The flow**
-1. The **Receptionist** registers the job (customer, service, title, fee, promised date, deposit, the customer's documents). The app gives
-   a job number such as `INC-2026-0001`; the customer keeps it to come back. The **CEO is notified**.
-2. The **CEO** gives the job to an engineer and sets the promised date. The **Engineer is notified**.
-3. The **Engineer** starts the work, can ask the customer for something (the Receptionist is notified), sets the permit stage for
-   building permits (documents collected, submitted to government with the reference number, under review, corrections requested,
-   approved), uploads the finished **PDF** and marks the job **Ready**. The **CEO and the Receptionist are notified**.
-4. When the customer returns, the **Receptionist** finds the job by number, name or phone. The finished document can be opened (and
-   printed from the PDF viewer, Ctrl+P) **only when the job is paid in full**. The Receptionist records any payment, hands over the
-   document and marks the job **Collected**. The CEO can release a document without full payment, but must write the reason.
+**The page has four tabs**
+- **Jobs**: one search bar (job number, customer, phone, email, title, engineer), tap buttons to filter (Open, Needs me, Ready, Waiting,
+  New, No email, All), one table. **Tap a row** to open the job (typing a full job number opens it at once).
+- **New job**: tap the service, type the customer (email is required so the customer gets updates, or tick "No email"), the title and
+  the fee, tap the promised date (3 days, 1 week...). Documents are optional.
+- **Inbox**: the notifications for the signed-in person. Tap one to open its job.
+- **Payments** (CEO, Accountant, Receptionist): money received and balances still to pay.
+
+**An opened job has five parts, one tap each:** Update (the next step as big buttons: give to an engineer, start work, need something
+from the customer, mark ready, handed to the customer), **Message** (tap who: the customer, CEO, Receptionist, Engineer; tap a
+ready-made message or write your own), Documents (optional), Money (tap Full balance / Half / Other), History.
+
+**Who is told, and how**
+| When | Office workers (inbox + email) | Customer (email) |
+|---|---|---|
+| Job registered | CEO | thank-you with the job number |
+| Given to an engineer | Engineer | "given to our engineer" |
+| Work started | | work has started |
+| Waiting for the customer | Receptionist, CEO | what is needed |
+| Permit stage changes | CEO, Receptionist (approved / corrections) | the stage and the government reference |
+| Ready | CEO, Receptionist | document ready, balance to pay |
+| Payment recorded | | receipt |
+| Collected | CEO | thank you |
+| A message written by a person | the people chosen | if chosen |
+
+A customer without an email address is flagged in red in the list and in the job, where the Receptionist can add the address.
 
 **Rules**
-- Deposits and part payments are allowed. A payment cannot be more than the balance. Only the CEO can delete a payment.
+- **No document is required.** The engineer can mark a job ready without uploading anything. The finished PDF can be attached
+  (optional); when there is one, the Receptionist can open it only when the job is paid in full.
+- The customer's papers are handed over (job marked Collected) only when the job is paid in full. The CEO can release without full
+  payment, but must write the reason.
 - An Engineer sees only his or her own jobs and no money. The Accountant sees jobs and payments but not the documents.
-- Every change is written in the job's **History** (who, when, what). Notifications appear on the Jobs page, with a number on the menu,
-  and are **also sent by email** to every person who has an email address (never to the person who did the action).
-  Emails use the same email settings as the password reset. In Streamlit **Settings > Secrets** keep this block (the app address is
-  optional; it is added to the email):
+- Every change is written in the job's History. Statuses: New, Assigned, In progress, Waiting for customer, Ready, Collected, Cancelled.
+- Files are kept in the database, up to 15 MB each. If they become big or many, only `inchars/services/files.py` needs to change.
+- Emails use the same `[smtp]` settings as the password reset. In Streamlit **Settings > Secrets** keep:
 
       app_url = "https://your-app.streamlit.app"
 
@@ -92,20 +111,17 @@ A separate part of the app, for the Receptionist, Engineer, CEO and Accountant. 
       password = "the app password"
       sender = "Inchars PD Group <your.address@gmail.com>"
 
-  Emails are sent in the background. If the mail server fails, the job action still works and the notice stays on the Jobs page.
-  Each person adds his or her email address at the first login (or the CEO in Users).
-- Statuses: New, Assigned, In progress, Waiting for customer, Ready, Collected, Cancelled. Only the CEO can reopen a closed job.
-  The Jobs page shows a count for each status on top, lists the **open jobs** by default, and has a **Refresh** button. A page shows
-  the latest statuses each time it is drawn (when you click something, change page, or press Refresh); it does not change by itself.
-- **The customer is emailed too** (if his or her email address was written when registering, or added later in the job's Actions tab):
-  a thank-you with the job number when the job is registered, then short updates when work starts, when something is needed from
-  the customer, at each building-permit stage, when the document is ready (with the balance to pay) and when it was collected.
-  The job's History shows each "Customer emailed" line.
-- **Receptionist and Engineer money requests** have two categories only: **Office use** and **Personal use**. A paid Personal use
-  request is a personal entry in Money used; Office use is a business entry.
-- Files are kept in the database, up to 15 MB each (PDF, JPG, PNG for the customer's documents; PDF only for the finished document).
-  If the files become big or many, only `inchars/storage.py` needs to change to use an online file store.
-- The CEO and Accountant dashboards have a **Services** tab; the Receptionist and Engineer dashboards show their own jobs.
+  Emails are sent in the background. If the mail server fails, the job action still works and the notice stays in the Inbox.
+- Receptionist and Engineer money requests have two categories: **Office use** and **Personal use**.
+
+## If something breaks (it cannot stop everything)
+
+- Each page is loaded only when it is opened. If one page is broken or out of date, **only that page** shows a message; the menu and all
+  the other pages keep working. Inside the Jobs page, each part (Update, Message, Documents, Money) also runs on its own.
+- The CEO has a **System check** page: it tries to start every file of the app and lists any that fail, with the reason.
+  After an update, open it first. The usual cause is a file that was not uploaded or not replaced: upload the whole `inchars` folder again
+  and reboot the app.
+- If the services tables cannot be created, the construction pages still start.
 
 ## Where to find what (code map)
 
@@ -115,7 +131,7 @@ A separate part of the app, for the Receptionist, Engineer, CEO and Accountant. 
 |---|---|
 | Login screen, password reset email | `inchars/login.py`, `inchars/accounts.py` |
 | Who can see what (roles, `has()`), which fields a person has | `inchars/accounts.py`, `inchars/data/scope.py` |
-| Menu per role, page list, `main()` | `inchars/router.py` |
+| Menu per role, page list (pages load one by one), `main()` | `inchars/router.py` |
 | Database connection, tables, saving | `inchars/db.py` |
 | Roles, default categories, constants | `inchars/config.py` |
 | Colours and look (CSS) | `inchars/styles.py` |
@@ -128,10 +144,16 @@ A separate part of the app, for the Receptionist, Engineer, CEO and Accountant. 
 | Material stock, requests, deliveries | `inchars/pages/stock.py`, `inchars/pages/store.py`, `inchars/pages/material_requests.py` (data: `inchars/data/materials.py`) |
 | Money requests, money used, taxes and debts | `inchars/pages/money_requests.py`, `money_used.py`, `taxes_debts.py` (data: `inchars/data/money.py`) |
 | Reports | `inchars/pages/reports.py` |
-| Jobs for customers: the page, one job, customers, payments | `inchars/pages/jobs.py`, `job_detail.py`, `customers.py`, `job_payments.py` |
-| Jobs dashboards (Receptionist, Engineer, Services tab) | `inchars/pages/jobs_dashboard.py` |
-| Jobs rules (who can do what), notifications, payments | `inchars/data/jobs.py` |
-| Where uploaded files are kept | `inchars/storage.py` |
+| The Jobs page (tabs, search, list, inbox) | `inchars/services/page_jobs.py` |
+| One opened job (header and the five parts) | `inchars/services/job_panel.py`, `panel_update.py`, `panel_message.py`, `panel_files.py`, `panel_money.py` |
+| Registering a job | `inchars/services/new_job.py` |
+| Who is notified and by email (staff and customer), messages | `inchars/services/notices.py` |
+| Who can do what on a job | `inchars/services/rules.py` |
+| Jobs, customers, payments, history (data) | `inchars/services/jobs.py`, `customers.py`, `payments.py`, `history.py` |
+| Where uploaded files are kept | `inchars/services/files.py` |
+| Services dashboards (Receptionist, Engineer, Services tab) | `inchars/services/dashboard.py` |
+| Services settings (services, statuses, quick choices, message templates) | `inchars/services/config.py` |
+| Which part of the app is broken | the **System check** page, `inchars/pages/system_check.py` |
 | Import from Excel | `inchars/pages/import_costs.py` |
 | Fields & categories, Users | `inchars/pages/setup.py`, `inchars/pages/users.py` |
 
@@ -141,7 +163,7 @@ by several pages. Files only import from the layers below them, so changing a pa
 ### Checking a change
 
 After editing, run `python tests/smoke_test.py` (every page for every role) and `python tests/jobs_workflow_test.py` (the whole job
-flow with its rules and notifications). They run on a temporary database and print OK or FAIL for each check, in a few seconds,
+flow, its rules, notifications and emails, and that one broken part does not stop the rest). They run on a temporary database and print OK or FAIL for each check, in a few seconds,
 without a browser. They need only `pandas`. If a page shows an error online, the traceback in Streamlit
 **Manage app** gives the file and line; fix it there, then run the smoke test before uploading.
 
