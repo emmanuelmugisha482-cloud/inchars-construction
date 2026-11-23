@@ -38,7 +38,7 @@ PAGES = {  # key: (file, function, Field drop-down on top?). Loaded only when th
 
 PAGE_DEFS = [  # key, label, icon, roles that get the page. A user with several roles gets all their pages.
     ("dashboard", "Dashboard", "dashboard", EVERYONE),
-    ("jobs", "Jobs", "assignment", (CEO, ACCOUNTANT, RECEPTIONIST, ENGINEER)),
+    ("jobs", "Jobs", "assignment", (CEO, RECEPTIONIST, ENGINEER)),
     ("stock", "Material stock", "inventory_2", ALL),
     ("matreq", "Material requests", "shopping_cart", ALL),
     ("receive", "Materials received", "move_to_inbox", (STORE,)),
@@ -127,7 +127,7 @@ def main():
         counts["matreq"] = safe_count("inchars.data.materials", "pending_material_requests")
         counts["moneyreq"] = safe_count("inchars.data.money", "pending_money_requests")
     if has(CEO, ACCOUNTANT, RECEPTIONIST, ENGINEER):  # unread job notifications
-        counts["jobs"] = safe_count("inchars.services.notices", "unread_count")
+        counts["jobs"] = safe_count("inchars.services.notify", "unread_count")
     sec, title = side_menu(allowed_pages(), counts)
     header(title)
     show_flash()

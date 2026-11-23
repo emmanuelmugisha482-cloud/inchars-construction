@@ -182,8 +182,8 @@ SERVICES_SCHEMA = [  # the services side (customers, jobs, payments, files, hist
         id {PK}, name TEXT NOT NULL, phone TEXT, email TEXT, note TEXT, created_at TEXT, created_by TEXT)""",
     f"""CREATE TABLE IF NOT EXISTS jobs(
         id {PK}, job_no TEXT UNIQUE NOT NULL, customer_id INTEGER, service TEXT, title TEXT, description TEXT,
-        status TEXT DEFAULT 'New', stage TEXT, gov_ref TEXT, fee BIGINT DEFAULT 0, due_on TEXT, assigned_to TEXT,
-        created_by TEXT, created_at TEXT, ready_at TEXT, collected_at TEXT, collected_by TEXT)""",
+        status TEXT DEFAULT 'With CEO', stage TEXT, gov_ref TEXT, fee BIGINT DEFAULT 0, due_on TEXT, assigned_to TEXT,
+        created_by TEXT, created_at TEXT, ready_at TEXT, collected_at TEXT, collected_by TEXT, returned_reason TEXT)""",
     f"""CREATE TABLE IF NOT EXISTS job_payments(
         id {PK}, job_id INTEGER, amount BIGINT, method TEXT, reference TEXT, paid_on TEXT, received_by TEXT, note TEXT, created_at TEXT)""",
     f"""CREATE TABLE IF NOT EXISTS job_files(
@@ -227,6 +227,17 @@ def init_db():
             else:
                 for t in SERVICES_SCHEMA:
                     c.execute(t)
+        # databases made before the CEO step: add the new column, and old 'New' jobs now wait 'With CEO'
+        with conn() as c:
+            if IS_PG:
+                c.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS returned_reason TEXT")
+            else:
+                try:
+                    c.execute("ALTER TABLE jobs ADD COLUMN returned_reason TEXT")
+                except sqlite3.OperationalError:
+                    pass  # column already there
+            for old, new in (("New", "With CEO"), ("Returned", "With CEO"), ("Assigned", "With engineer"), ("In progress", "With engineer")):
+                c.execute("UPDATE jobs SET status=? WHERE status=?", (new, old))
     except Exception:  # noqa: BLE001
         import traceback
         traceback.print_exc()
