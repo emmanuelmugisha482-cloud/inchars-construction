@@ -7,7 +7,6 @@ import pandas as pd
 import streamlit as st
 
 import inchars
-from inchars.accounts import smtp_conf
 from inchars.components.common import wide
 from inchars.db import df
 
@@ -35,7 +34,7 @@ def system_check_page():
     else:
         st.success(f"All {len(parts)} parts of the app can start.")
     wide(st.dataframe, parts, hide_index=True)
-    st.subheader("Database and email")
+    st.subheader("Database")
     try:
         df("SELECT 1 AS ok")
         st.markdown("Database: **connected**")
@@ -47,4 +46,26 @@ def system_check_page():
             st.markdown(f"{label}: table is there, {n:,} record(s)")
         except Exception:  # noqa: BLE001
             st.warning(f"{label}: the table is missing or cannot be read.")
-    st.markdown("Email: " + ("**set up** (notifications are also sent by email)" if smtp_conf() else "**not set up** (notifications appear in the app only)"))
+    st.subheader("Email")
+    try:
+        mail_part()
+    except Exception as e:  # noqa: BLE001
+        st.error(f"The email check could not run ({type(e).__name__}: {e}). The rest of the app works.")
+
+
+def mail_part():
+    from inchars.accounts import send_email, smtp_conf
+    cfg = smtp_conf()
+    if not cfg:
+        return st.warning("Email is **not set up**: customers and staff are not emailed. Add an [smtp] section in Streamlit Secrets (see README, 'Email'), then reboot the app.")
+    st.markdown(f"Email is **set up**: {cfg['host']}, port {cfg['port']}, sending as {cfg['sender'] or cfg['user']}. Send yourself a test to be sure it works:")
+    to = st.text_input("Your email address", placeholder="you@example.com", key="mail_test_to")
+    if st.button("Send a test email", key="mail_test_go"):
+        if "@" not in to:
+            return st.error("Write a valid email address first.")
+        try:
+            send_email(to.strip(), "Test from Inchars PD Group", "Hello,\n\nThis is a test email from the Inchars app. It works.\n\nInchars PD Group", cfg)
+            st.success(f"Sent to {to.strip()}. If it does not arrive in a minute, look in the spam folder.")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"The email could not be sent: {type(e).__name__}: {e}")
+            st.caption("Common causes: for Gmail use an App Password (not your normal password) with host smtp.gmail.com and port 465; a wrong port; a blocked account.")
