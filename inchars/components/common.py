@@ -79,7 +79,7 @@ def pretty(frame, money_cols=(), status_col=None, qty_cols=()):
               "Out of stock": red, "In stock": green, "Rejected": red, "Delivered": green,
               "Pending": "background-color:#fff3d6;color:#7a4a00", "Approved": "background-color:#dbeeff;color:#0b3a66",
               "Paid": green, "Settled": green, "Overdue": red, "Open": "background-color:#fff3d6;color:#7a4a00",
-              "New": "background-color:#fff3d6;color:#7a4a00", "Assigned": "background-color:#dbeeff;color:#0b3a66",
+              "New": "background-color:#fff3d6;color:#7a4a00", "With CEO": "background-color:#fff3d6;color:#7a4a00", "Returned": "background-color:#fde2e0;color:#8a1c14", "With engineer": "background-color:#dbeeff;color:#0b3a66", "In review": "background-color:#ece6fb;color:#3d2a85", "Reverted": "background-color:#fde2e0;color:#8a1c14", "Assigned": "background-color:#dbeeff;color:#0b3a66",
               "In progress": "background-color:#dbeeff;color:#0b3a66", "Waiting for customer": "background-color:#ffe6cc;color:#7a3a00",
               "Ready": green, "Collected": "background-color:#eceff1;color:#455a64", "Cancelled": "background-color:#eceff1;color:#455a64"}
     try:
