@@ -10,16 +10,14 @@ from inchars.accounts import has
 from inchars.components.charts import card, c_bar, c_donut, c_grouped, month_label
 from inchars.components.common import money
 from inchars.components.kpi import AMBER, GREEN, RED, insights_html, kpi, kpi_grid, monthly_vals, spark_svg, trend
-from inchars.config import ACCOUNTANT, CEO, RECEPTIONIST
+from inchars.config import CEO, ENGINEER, RECEPTIONIST
 from inchars.services.config import OPEN_STATUSES
-from inchars.services.jobs import load_jobs
-from inchars.services.notices import unread_count
-from inchars.services.payments import load_payments
-from inchars.services.rules import sees_all_jobs
+from inchars.services.core import load_jobs, sees_all_jobs
+from inchars.services.money import load_payments
+from inchars.services.notify import unread_count
 from inchars.styles import DASH_CSS
 
-STATUS_COLORS = {"New": "#e0922f", "Assigned": "#2f6fb0", "In progress": "#3aa6a0", "Waiting for customer": "#b5527f", "Ready": "#0b6a35",
-                 "Collected": "#8a948d", "Cancelled": "#c9453b"}
+STATUS_COLORS = {"With CEO": "#e0922f", "With engineer": "#2f6fb0", "Waiting for customer": "#b5527f", "In review": "#7a5fc4", "Reverted": "#f0605d", "Ready": "#2e9b57", "Collected": "#7b8794", "Cancelled": "#9aa3ad"}
 
 
 def _last_months(n=6):
@@ -31,7 +29,7 @@ def _last_months(n=6):
 
 
 def _who():
-    if has(CEO, ACCOUNTANT):
+    if has(CEO):
         return "boss"
     return "reception" if has(RECEPTIONIST) else "engineer"
 
@@ -49,7 +47,7 @@ def service_cards(jobs, pays, who):
     coll_month = int((jobs.collected_at.astype(str).str[:7] == month).sum())
     if who == "boss":
         return [kpi("Open jobs", len(open_), "not collected yet", "blue", spark_svg(reg_m, labs, "#2f6fb0"), trend(reg_m[-1], reg_m[-2], labs[-2], lambda v: f"{v:,.0f}")),
-                kpi("To give to an engineer", int((jobs.status == "New").sum()), "new jobs waiting for you", "amber" if (jobs.status == "New").any() else "green"),
+                kpi("Needs your decision", int(jobs.status.isin(["With CEO", "In review"]).sum()), "to assign, or to check", "amber" if jobs.status.isin(["With CEO", "In review"]).any() else "green"),
                 kpi("Ready for the customer", len(ready), "document finished", "green"),
                 kpi("Overdue", overdue, "past the promised date", "red" if overdue else "green"),
                 kpi("Still to pay", money(unpaid.balance.sum()) if len(unpaid) else "0", f"Frw · {len(unpaid)} job(s)", "red" if len(unpaid) else "green"),
@@ -61,10 +59,10 @@ def service_cards(jobs, pays, who):
                 kpi("Still to pay", money(unpaid.balance.sum()) if len(unpaid) else "0", f"Frw · {len(unpaid)} job(s)", "red" if len(unpaid) else "green"),
                 kpi("Registered this month", int(reg_m[-1]), "new jobs", "blue"),
                 kpi("Collected this month", coll_month, "documents handed over", "grey")]
-    todo = int((jobs.status == "Assigned").sum())
+    todo = int(jobs.status.isin(["With engineer", "Reverted"]).sum())
     finished = int((jobs.ready_at.astype(str).str[:7] == month).sum())
     return [kpi("My open jobs", len(open_), "not collected yet", "blue"),
-            kpi("To start", todo, "given to you, not started", "amber" if todo else "green"),
+            kpi("To do", todo, "given to you, or sent back to you", "amber" if todo else "green"),
             kpi("Waiting for customer", len(waiting), "you asked the customer for something", "amber" if len(waiting) else "green"),
             kpi("Overdue", overdue, "past the promised date", "red" if overdue else "green"),
             kpi("Ready for the customer", len(ready), "finished, waiting to be collected", "green"),
@@ -73,9 +71,9 @@ def service_cards(jobs, pays, who):
 
 def service_says(jobs, who):
     says = []
-    new = int((jobs.status == "New").sum())
+    new = int((jobs.status == "With CEO").sum())
     if who == "boss" and new:
-        says.append((AMBER, f"<b>To assign:</b> {new} new job(s) are waiting for you to choose an engineer."))
+        says.append((AMBER, f"<b>To assign:</b> {new} job(s) are waiting for your decision: give to an engineer, or send back."))
     overdue = jobs[jobs.overdue]
     if len(overdue):
         says.append((RED, f"<b>Overdue:</b> {len(overdue)} job(s) are past the promised date ({html.escape(', '.join(overdue.job_no.head(3)))}{'…' if len(overdue) > 3 else ''})."))
@@ -97,6 +95,8 @@ def service_says(jobs, who):
 
 def services_tab(who=None):
     who = who or _who()
+    if not has(CEO, RECEPTIONIST, ENGINEER):
+        return st.info("The customers' jobs are handled by the CEO, the Receptionist and the Engineers.")
     jobs = load_jobs()
     pays = load_payments() if sees_all_jobs() else pd.DataFrame(columns=["date", "amount"])
     st.markdown('<div class="dsec">Services</div><div class="dcap">Consultancy, house design and building permits</div>', unsafe_allow_html=True)

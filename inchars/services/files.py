@@ -1,19 +1,17 @@
-"""Files of a job: the customer's documents and the finished PDF. Both are optional.
+"""Files of a job (data and the Documents part of an opened job): the customer's documents and the finished PDF. Both are optional.
 
 Where the files are kept: in the database (tables job_files and job_file_data), because Streamlit Cloud cannot keep files on its own
-disk. If the files become big or many (for example large drawings), only save_file, read_file and delete_file need to change to
-use an online file store such as Cloudflare R2 or Supabase Storage."""
+disk. If the files become big or many, only save_file, read_file and delete_file need to change to use an online file store."""
 
 import streamlit as st
 
-from inchars.config import CEO
 from inchars.accounts import has
+from inchars.components.common import K, done
+from inchars.config import CEO, RECEPTIONIST
 from inchars.db import conn, df
 from inchars.services.config import MAX_FILE_MB, OPEN_STATUSES
-from inchars.services.history import log_event, now
-from inchars.services.notices import notify, usernames_with_role
-from inchars.services.rules import can, fetch_job
-from inchars.config import RECEPTIONIST
+from inchars.services.core import can, can_open_deliverable, fetch_job, log_event, now
+from inchars.services.notify import after_commit, notify, usernames_with_role
 
 PDF_ONLY = ("pdf",)
 DOCUMENT_TYPES = ("pdf", "jpg", "jpeg", "png")
@@ -57,6 +55,7 @@ def delete_file(file_id):
         c.execute("DELETE FROM job_files WHERE id=?", (int(file_id),))
 
 
+@after_commit
 def add_files(job_id, kind, files):
     """files = [(filename, bytes)]. The finished document must be a PDF. Returns an error text, or None."""
     with conn() as c:
@@ -93,3 +92,56 @@ def remove_file(job_id, file_id):
         log_event(c, job_id, "File removed", f["filename"])
     delete_file(file_id)
     return None
+
+
+def _msg(err, ok):
+    if err:
+        st.error(err)
+    else:
+        done(ok)
+
+
+def files_section(j, p):
+    jid, k = int(j.id), f"{p}{int(j.id)}_"
+    if not can("see_files", j):
+        return st.caption("Documents are not shown to your role.")
+    files = list_files(jid)
+    release = can_open_deliverable(j)
+    st.caption("Documents are optional. The finished PDF can be opened when the job is paid in full.")
+    if files.empty:
+        st.caption("No file yet.")
+    for _, f in files.iterrows():
+        locked = f.kind == "Deliverable" and not release
+        a, b, c, d = st.columns([3, 1.4, 2, 1.6])
+        a.markdown(f"**{f.filename}**  \n{f.kind} · {f['size'] / 1024:,.0f} KB")
+        b.caption(f"{f.uploaded_by}")
+        c.caption(str(f.uploaded_at).replace("T", " "))
+        if locked:
+            d.caption("Locked until paid")
+        elif d.button("Get file", key=K(f"{k}gf{int(f.id)}")):
+            st.session_state["file_ready"] = int(f.id)
+    ready = st.session_state.get("file_ready")
+    if ready and ready in set(files.id.astype(int)):
+        f = files[files.id == ready].iloc[0]
+        if not (f.kind == "Deliverable" and not release):
+            data = read_file(ready)
+            if data:
+                st.download_button(f":material/download: Download {f.filename}", data, f.filename, mime=f.mime, type="primary", key=K(f"{k}dl{ready}"))
+                st.caption("Open the file, then print it from the PDF viewer (Ctrl+P).")
+    if can("upload_customer", j):
+        with st.expander("Add the customer's documents (optional)"):
+            up = st.file_uploader("PDF, JPG or PNG", type=["pdf", "jpg", "jpeg", "png"], accept_multiple_files=True, key=K(k + "uc"))
+            if up and st.button("Save the documents", key=K(k + "ucb")):
+                _msg(add_files(jid, "Customer document", [(u.name, u.getvalue()) for u in up]), f"{len(up)} document(s) saved.")
+    if can("upload_deliverable", j):
+        with st.expander("Attach the finished document, PDF (optional)"):
+            up = st.file_uploader("PDF only", type=["pdf"], accept_multiple_files=True, key=K(k + "ud"))
+            if up and st.button("Save the PDF", type="primary", key=K(k + "udb")):
+                _msg(add_files(jid, "Deliverable", [(u.name, u.getvalue()) for u in up]), f"{len(up)} PDF saved.")
+    if len(files) and j.status != "Collected":
+        mine = files[(files.uploaded_by == st.session_state.user) | has(CEO)]
+        if len(mine):
+            with st.expander("Remove a file"):
+                pick = st.selectbox("File", mine.filename.tolist(), index=None, placeholder="Choose a file", key=K(k + "rf"))
+                if pick and st.button("Remove this file", key=K(k + "rfb")):
+                    _msg(remove_file(jid, int(mine[mine.filename == pick].id.iloc[0])), "File removed.")
