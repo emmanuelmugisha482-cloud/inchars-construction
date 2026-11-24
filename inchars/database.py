@@ -6,6 +6,7 @@ import sqlite3
 import streamlit as st
 import time
 from contextlib import contextmanager
+from functools import wraps
 
 from inchars.settings import DB, DEFAULT_CATEGORIES, MONEY_CATEGORIES
 
@@ -77,6 +78,40 @@ def _checkout():
     raise RuntimeError(f"Cannot reach the database right now. Please try again in a moment. ({last})")
 
 
+def _note_write():
+    """Every save by this person makes the cached lists below start again, so he or she always sees his or her own change at once."""
+    try:
+        st.session_state["_writes"] = st.session_state.get("_writes", 0) + 1
+    except Exception:  # noqa: BLE001  (a background thread has no session: nothing to clear)
+        pass
+
+
+def cached(ttl=20):
+    """Keep the result of a list-reading function for `ttl` seconds for this person, so a click does not ask the (far away) database again.
+    The list is read again when this person saves something, when the time is over, or when the person, role or Field changes.
+    Other people's changes appear within `ttl` seconds."""
+    def wrap(fn):
+        @wraps(fn)
+        def run(*a, **k):
+            try:
+                ss = st.session_state
+                key = (fn.__module__, fn.__qualname__, repr(a), repr(sorted(k.items())), ss.get("uid"), ss.get("ceo_scope"), tuple(ss.get("roles", ())))
+                store = ss.setdefault("_cache", {})
+                hit, w = store.get(key), ss.get("_writes", 0)
+            except Exception:  # noqa: BLE001
+                return fn(*a, **k)
+            if hit and time.time() - hit[0] < ttl and hit[2] == w:
+                v = hit[1]
+            else:
+                v = fn(*a, **k)
+                if len(store) > 150:
+                    store.clear()
+                store[key] = (time.time(), v, ss.get("_writes", 0))
+            return v.copy() if hasattr(v, "copy") else v
+        return run
+    return wrap
+
+
 class Conn:
     """Lets the same SQL (written with ? marks) run on SQLite and on PostgreSQL."""
 
@@ -85,6 +120,8 @@ class Conn:
 
     def execute(self, sql, params=()):
         params = tuple(p.item() if hasattr(p, "item") else p for p in params)  # numpy numbers -> python
+        if not sql.lstrip()[:6].upper() == "SELECT":
+            _note_write()
         cur = self.raw.cursor()
         cur.execute(sql.replace("?", "%s") if IS_PG else sql, params)
         return cur

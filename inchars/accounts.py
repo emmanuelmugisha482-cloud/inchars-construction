@@ -10,7 +10,7 @@ import time
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 
-from inchars.database import IS_PG, IntegrityErrors, bulk_insert, conn, df, run
+from inchars.database import IS_PG, IntegrityErrors, bulk_insert, cached, conn, df, run
 from inchars.settings import BG_IMAGE, CEO, EMAIL_RE, LOGIN_CSS, LOGO, SEE_ALL, check_pw, hash_pw
 
 
@@ -64,6 +64,7 @@ def authenticate(username, password):
     return u if u and check_pw(password, u["password_hash"]) else None
 
 
+@cached(ttl=15)
 def get_user(uid):
     with conn() as c:
         return c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
@@ -183,6 +184,7 @@ def seed_first_manager():
             c.execute("INSERT INTO user_roles(user_id, role) VALUES(?,?)", (uid, CEO))
 
 
+@cached(ttl=15)
 def load_roles(uid):
     return df("SELECT role FROM user_roles WHERE user_id=? ORDER BY role", (uid,))["role"].tolist()
 
@@ -235,6 +237,7 @@ def set_user_sites(uid, site_ids):
 # from data/scope.py
 # ======================================================================
 
+@cached(ttl=15)
 def visible_sites():
     """CEO sees every field. Everybody else only the fields given to them. On the new pages the Field drop-down at the
     top narrows this to one field (ceo_scope is set by main)."""
@@ -249,6 +252,7 @@ def visible_sites():
     return sites
 
 
+@cached(ttl=15)
 def categories_df():
     return df("SELECT id, name FROM categories ORDER BY name")
 

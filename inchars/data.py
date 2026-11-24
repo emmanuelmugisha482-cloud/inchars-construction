@@ -5,7 +5,7 @@ import streamlit as st
 from datetime import date, datetime, timedelta
 
 from inchars.accounts import categories_df, has, visible_sites
-from inchars.database import Abort, bulk_insert, conn, df, ensure_named
+from inchars.database import Abort, bulk_insert, cached, conn, df, ensure_named
 from inchars.settings import ACCOUNTANT, CEO, EXP_COLS, FIELD, FUND_COLS, MOVE_COLS, REQ_COLS, STORE
 
 
@@ -13,6 +13,7 @@ from inchars.settings import ACCOUNTANT, CEO, EXP_COLS, FIELD, FUND_COLS, MOVE_C
 # from data/expenses.py
 # ======================================================================
 
+@cached(ttl=20)
 def load_expenses(site_ids):
     if not site_ids:
         return pd.DataFrame(columns=EXP_COLS)
@@ -23,6 +24,7 @@ def load_expenses(site_ids):
                   ORDER BY e.spent_on DESC, e.id DESC""", tuple(site_ids))
 
 
+@cached(ttl=20)
 def load_funds(site_ids):
     if not site_ids:
         return pd.DataFrame(columns=FUND_COLS)
@@ -62,10 +64,12 @@ def delete_expenses(ids, user, uid, is_accountant):
 # from data/materials.py
 # ======================================================================
 
+@cached(ttl=20)
 def load_materials():
     return df("SELECT id, name, unit FROM materials ORDER BY name")
 
 
+@cached(ttl=20)
 def load_moves(site_ids):
     if not site_ids:
         return pd.DataFrame(columns=MOVE_COLS)
@@ -155,6 +159,7 @@ def count_stock(site_id, counted, note, user):
     return changed
 
 
+@cached(ttl=20)
 def load_mat_requests(site_ids):
     if not site_ids:
         return pd.DataFrame(columns=REQ_COLS)
@@ -259,6 +264,7 @@ def deliver_mat_lines(deliveries, user, uid):
     return n
 
 
+@cached(ttl=20)
 def pending_material_requests():
     """How many requests wait for the signed-in Accountant or CEO."""
     sites = visible_sites()
@@ -295,6 +301,7 @@ def field_choices(sites):
     return {"(no field)": None, **{r.name: int(r.id) for r in sites.itertuples()}}
 
 
+@cached(ttl=20)
 def load_money_requests():
     """Everybody sees their own requests. The Accountant also sees those of their fields and company-level ones."""
     user, uid = st.session_state.user, st.session_state.uid
@@ -365,11 +372,13 @@ def pay_money_requests(ids, user):
     return n
 
 
+@cached(ttl=20)
 def pending_money_requests():
     r = load_money_requests()
     return int((r.Status == "Pending").sum()) if has(CEO) else int((r.Status == "Approved").sum()) if has(ACCOUNTANT) else 0
 
 
+@cached(ttl=20)
 def load_ledger():
     user = st.session_state.user
     where, params = ("(l.kind='Business' OR l.person=?)", [user]) if has(CEO, ACCOUNTANT) else ("l.person=?", [user])
@@ -379,6 +388,7 @@ def load_ledger():
                   ORDER BY l.spent_on DESC, l.id DESC""", tuple(params))
 
 
+@cached(ttl=20)
 def load_debts(field):
     d = df("""SELECT d.party AS "Who", d.direction AS "Direction", d.amount AS "Amount",
               COALESCE((SELECT SUM(p.amount) FROM debt_payments p WHERE p.debt_id=d.id), 0) AS "Paid",
@@ -389,6 +399,7 @@ def load_debts(field):
     return d[d.Balance > 0].reset_index(drop=True)
 
 
+@cached(ttl=20)
 def load_taxes(field):
     t = df("""SELECT t.paid_on AS "Date", t.tax_type AS "Tax", t.amount AS "Amount", COALESCE(s.name, '(no field)') AS "Field"
               FROM taxes t LEFT JOIN sites s ON s.id=t.site_id""")

@@ -64,7 +64,27 @@ def mail_part():
     from inchars.accounts import send_email, smtp_conf
     cfg = smtp_conf()
     if not cfg:
-        return st.warning("Email is **not set up**: customers and staff are not emailed. Add an [smtp] section in Streamlit Secrets (see README, 'Email'), then reboot the app.")
+        st.warning("Email is **not set up**: customers and staff are not emailed.")
+        try:
+            given = dict(st.secrets["smtp"])
+        except Exception:  # noqa: BLE001
+            given = {}
+        if given:
+            missing = [k for k in ("host", "user", "password") if not given.get(k)]
+            st.error("An [smtp] section exists in Secrets, but this is missing or empty: " + ", ".join(missing) + ".")
+        else:
+            st.info("There is no [smtp] section in Streamlit Secrets yet.")
+        st.markdown("""**How to set it up (Gmail is free):**
+1. Use the office mailbox (for example `inchars.office@gmail.com`). Open **Google Account > Security**, turn on **2-Step Verification**, then open **App passwords**, create one called *Inchars* and copy the 16 letters (write them without spaces). Your normal password will not work.
+2. In Streamlit open your app > **Settings > Secrets**, and add the block below **at the very bottom**, under the `DATABASE_URL` line (anything written after `[smtp]` belongs to it).
+3. Press **Save**, then **Reboot app**, then come back to this page and press **Send a test email**.""")
+        st.code('''[smtp]
+host = "smtp.gmail.com"
+port = 465
+user = "inchars.office@gmail.com"
+password = "abcdefghijklmnop"
+sender = "Inchars PD Group <inchars.office@gmail.com>"''', language="toml")
+        return
     st.markdown(f"Email is **set up**: {cfg['host']}, port {cfg['port']}, sending as {cfg['sender'] or cfg['user']}. Send yourself a test to be sure it works:")
     to = st.text_input("Your email address", placeholder="you@example.com", key="mail_test_to")
     if st.button("Send a test email", key="mail_test_go"):
