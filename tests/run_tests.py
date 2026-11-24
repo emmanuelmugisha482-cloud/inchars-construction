@@ -73,6 +73,9 @@ mails_to = lambda to: [(s, b) for t, s, b in sent if t == to]
 ALICE, ERIC = "alice@example.rw", "eric@example.rw"
 
 
+table_drawn = lambda: any("open" in str(l[1]) and "with the CEO" in str(l[1]) for l in LOG if l[0] == "caption")  # the summary line above the table
+
+
 def job(no):
     return app.df("SELECT * FROM jobs WHERE job_no=?", (no,)).iloc[0]
 
@@ -273,16 +276,24 @@ check("the list shows the family name in capitals and the coloured status", any(
 # the eye opens a job to read, the pencil to work on it, the mail button emails the customer
 sign_in("ceo"); st.session_state.jb_open = None
 PRESS.add(f"jb_eye{jid}")
-show_page("jobs")
+try:
+    show_page("jobs")
+except stub.Rerun:
+    pass
 check("the eye opens the job to read (view)", st.session_state.get("jb_open") == jid and st.session_state.get("jb_mode") == "view")
 LOG.clear(); st.session_state.jb_open = jid; st.session_state.jb_mode = "view"; txt = show_page("jobs")
 check("the view shows the description, the customer and what happened", "What the customer asked for" in txt and "What happened" in txt and "DUSENGIMANA" not in "x")
 PRESS.clear(); PRESS.add(f"jb_pen{jid}")
-show_page("jobs")
+st.session_state.jb_open = None
+try:
+    show_page("jobs")
+except stub.Rerun:
+    pass
 check("the pencil opens the job to work on it (edit)", st.session_state.get("jb_open") == jid and st.session_state.get("jb_mode") == "edit")
 PRESS.clear()
 sign_in("eng"); st.session_state.jb_open = None; LOG.clear(); OVERRIDE["jb_show"] = "All"; show_page("jobs"); OVERRIDE.clear()
-check("the engineer has no mail button", not any("jb_mail" in str(l) for l in LOG))
+check("the engineer has no mail button", not any(l[0] == "button" and str(l[2]).startswith("jb_mail") for l in LOG))
+check("the engineer has a table with eye buttons", any(l[0] == "button" and str(l[2]).startswith("jb_eye") for l in LOG))
 mine = app.load_jobs()
 check("the engineer gets the pencil only where there is something to do", all(app.can_act({"status": r.status, "assigned_to": r.assigned_to, "service": r.service}) for r in mine[mine.status.isin(["With engineer", "Reverted"])].itertuples()))
 st.session_state.jb_open = None
@@ -330,6 +341,38 @@ check("Show, Service, Engineer and Month are dropdowns", {"Show", "Service", "En
 check("every KPI card has the same light-blue look", 'class="kc"' in app.kpi("A", 1, "d", "red") and 'class="kc"' in app.kpi("A", 1, "d", "green") and ".kc.red" not in app.DASH_CSS and ".kc.amber" not in app.DASH_CSS)
 import inspect
 check("choices are dropdowns, not tap buttons", "pills" not in inspect.getsource(app.pick))
+
+# ---- the table footer, the job page, and speed ----
+check("page numbers like the example: 1 2 3 4 5 ... last", app.page_numbers(0, 138) == [1, 2, 3, 4, 5, "...", 138] and app.page_numbers(60, 138) == [1, "...", 60, 61, 62, "...", 138]
+      and app.page_numbers(0, 3) == [1, 2, 3] and app.page_numbers(137, 138) == [1, "...", 134, 135, 136, 137, 138])
+sign_in("ceo"); st.session_state.jb_open = None; OVERRIDE["jb_show"] = "All"; LOG.clear(); show_page("jobs")
+check("the table footer: total records, page size dropdown, Go to", any("Total" in str(l[1]) and "records" in str(l[1]) for l in LOG if l[0] == "md") and "Rows" in [l[1] for l in LOG if l[0] == "select"])
+check("the filters are remembered for when you come back from a job", st.session_state.get("jb_saved", {}).get("jb_show") == "All")
+OVERRIDE.clear()
+st.session_state.jb_open = jid; st.session_state.jb_mode = "view"; LOG.clear(); show_page("jobs")
+check("an opened job is its own page: the table is not drawn, a Back button is", not table_drawn() and any(l[0] == "button" and l[2] == "jb_back" for l in LOG))
+PRESS.add("jb_back")
+try:
+    show_page("jobs")
+except stub.Rerun:
+    pass
+PRESS.clear()
+check("Back returns to the table", st.session_state.get("jb_open") is None)
+st.session_state.pop("jb_show", None); LOG.clear(); show_page("jobs")
+check("after Back the filters are as you left them", st.session_state.get("jb_show") == "All" and table_drawn())
+OVERRIDE.clear()
+# the cache: your own change shows at once, and a list is a copy nobody can spoil
+n1 = len(app.load_jobs()); first = app.load_jobs(); first.loc[:, "title"] = "SPOILED"
+check("a cached list is a copy: changing it does not change the cache", (app.load_jobs().title != "SPOILED").all())
+ja, na, _ = (sign_in("rec") or app.create_job(cid, "Other", "Cache check", "", 0, "2026-12-30"))
+check("your own change is in the list at once (the cache starts again)", len(app.load_jobs()) == n1 + 1 and na in set(app.load_jobs().job_no))
+calls = []
+dbm_ = modules["inchars.database"]
+real_exec = dbm_.Conn.execute
+dbm_.Conn.execute = lambda self, sql, params=(): (calls.append(sql), real_exec(self, sql, params))[1]
+app.load_jobs(); app.load_jobs(); app.load_jobs()
+dbm_.Conn.execute = real_exec
+check("three reads of the jobs list ask the database only once", len(calls) <= 1)
 
 # ---- the screen action: register a job from the New job form ----
 sign_in("rec")
@@ -430,18 +473,23 @@ ui.importlib.import_module = import_breaking("inchars.jobs.extras")
 sign_in("rec"); st.session_state.jb_open = j3; st.session_state.jb_mode = "edit"
 OVERRIDE[k("jbpart" + str(j3) + "_" + str(st.session_state.get("jb_ver", 0)))] = "Money"
 LOG.clear(); show_page("jobs")
-check("a broken extras file: the 'Money' part shows a message in place and the page still draws", any("has a problem" in l[1] for l in LOG if l[0] == "error") and any("job(s)" in str(l[1]) for l in LOG if l[0] == "caption"))
-OVERRIDE.clear()
-sign_in("ceo"); st.session_state.jb_open = None
-LOG.clear(); show_page("jobs")
-check("a broken extras file: the Payments tab shows a message, the Jobs table still draws", any("has a problem" in l[1] for l in LOG if l[0] == "error") and any("job(s)" in str(l[1]) for l in LOG if l[0] == "caption"))
+check("a broken extras file: the 'Money' part shows a message in place, the job page and its Back button still draw",
+      any("has a problem" in l[1] for l in LOG if l[0] == "error") and any(l[0] == "button" and l[2] == "jb_back" for l in LOG))
+OVERRIDE.clear(); st.session_state.jb_open = None
+sign_in("ceo")
+OVERRIDE["jb_section"] = "Payments"; LOG.clear(); show_page("jobs")
+check("a broken extras file: the Payments section shows a message", any("has a problem" in l[1] for l in LOG if l[0] == "error"))
+OVERRIDE.clear(); LOG.clear(); show_page("jobs")
+check("a broken extras file: the Jobs table still draws", table_drawn() and not any(l[0] == "error" for l in LOG))
 ui.importlib.import_module = real_import
-# a bug inside one tab (not a missing file) is caught too
+# a bug inside one section (not a missing file) is caught too
 page_mod = modules["inchars.jobs.page"]
 real_form = page_mod.new_job_form
 page_mod.new_job_form = lambda: (_ for _ in ()).throw(ValueError("bug in the form"))
-sign_in("rec"); LOG.clear(); show_page("jobs")
-check("a bug in the New job tab does not stop the Jobs table", any("has a problem" in l[1] for l in LOG if l[0] == "error") and any("job(s)" in str(l[1]) for l in LOG if l[0] == "caption"))
+sign_in("rec"); OVERRIDE["jb_section"] = "New job"; LOG.clear(); show_page("jobs")
+check("a bug in the New job section shows a message in place", any("has a problem" in l[1] for l in LOG if l[0] == "error"))
+OVERRIDE.clear(); LOG.clear(); show_page("jobs")
+check("a bug in the New job section does not stop the Jobs table", table_drawn())
 page_mod.new_job_form = real_form
 st.session_state.jb_open = None
 

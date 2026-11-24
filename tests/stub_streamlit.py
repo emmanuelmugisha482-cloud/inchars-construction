@@ -63,7 +63,9 @@ class STClass(W):
         d = list(default or []) if selection_mode == "multi" else default
         return self._o(label, key, d)
     def checkbox(self, label, value=False, key=None, **k): return self._o(label, key, value)
-    def button(self, label, key=None, **k): return (key in PRESS) or (label in PRESS)
+    def button(self, label, key=None, **k):
+        LOG.append(("button", label, key))
+        return (key in PRESS) or (label in PRESS)
     def download_button(self, label, data, *a, **k):
         LOG.append(("download", label, len(data)))
         return False
@@ -71,7 +73,8 @@ class STClass(W):
         for pre, fr in EDITORS.items():
             if key and key.startswith(pre): return fr
         return data
-    def rerun(self): raise Rerun()
+    def rerun(self, scope="app"): raise Rerun()
+    def fragment(self, fn=None, **k): return fn if fn else (lambda f: f)  # like Streamlit: the function itself
     def metric(self, l, v, *a, **k): LOG.append(("metric", l, v))
     def altair_chart(self, *a, **k):
         LOG.append(("chart",)); import types as _t; return _t.SimpleNamespace(selection=CLICK.get('sel', {}))
