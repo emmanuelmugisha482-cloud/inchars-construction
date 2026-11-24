@@ -21,18 +21,37 @@ from inchars.widgets import K, done, due_pick, kpi, kpi_grid, match, pick, run_s
 # ======================================================================
 
 SHOW = ["Open", "Needs me", "New updates", "With CEO", "In review", "Reverted", "Ready", "Waiting", "Missing info", "All"]
-PAGE_SIZE = 15
+PAGE_SIZES = ["10 / page", "20 / page", "50 / page"]
 # the coloured label of each status
 PILL = {"With CEO": ("#e0922f", ""), "With engineer": ("#2f6fb0", ""), "Waiting for customer": ("#b5527f", ""), "In review": ("#7a5fc4", ""),
         "Reverted": ("#f0605d", "\u2715 "), "Ready": ("#2e9b57", "\u2713 "), "Collected": ("#7b8794", ""), "Cancelled": ("#9aa3ad", "")}
-ROW_CSS = """<style>
-.jr-h{font-size:.78rem;color:#6b7785;font-weight:600;padding:6px 0;border-bottom:2px solid #cfe9f1}
-.jr{font-size:.92rem;padding:7px 0;border-bottom:1px solid #d9eef4;line-height:1.25}
-.jr small{color:#8a96a3}
-.jr .newu{color:#2f6fb0;font-weight:600}
-.pill{display:inline-block;color:#fff;border-radius:14px;padding:3px 12px;font-size:.8rem;font-weight:600;white-space:nowrap}
+GRID = "display:grid;grid-template-columns:1.45fr 1.25fr 1.25fr 1.05fr 1.1fr 1.35fr;gap:8px;align-items:center"
+ROW_CSS = f"""<style>
+.jr-h{{{GRID};font-size:.8rem;color:#44525f;font-weight:700;padding:8px 0;border-bottom:2px solid #cfe9f1}}
+.jr{{{GRID};font-size:.92rem;padding:8px 0;border-bottom:1px solid #d9eef4;line-height:1.25}}
+.jr small{{color:#8a96a3}}
+.jr .newu{{color:#2f6fb0;font-weight:600;font-size:.8rem}}
+.pill{{display:inline-block;color:#fff;border-radius:14px;padding:3px 12px;font-size:.8rem;font-weight:600;white-space:nowrap}}
+.jtitle{{color:#1d9bf0;font-weight:700;font-size:1.15rem}}
+[class*="st-key-jb_eye"] button,[class*="st-key-jb_pen"] button,[class*="st-key-jb_mail"] button{{border:none;background:transparent;padding:0;min-height:0;box-shadow:none}}
+[class*="st-key-jb_eye"] button{{color:#1b8a4b}}
+[class*="st-key-jb_pen"] button{{color:#1d5fd0}}
+[class*="st-key-jb_mail"] button{{color:#e07b00}}
 </style>"""
-WIDTHS = [2.0, 1.8, 1.8, 1.6, 2.0, 2.1, 0.5, 0.5, 0.5]
+WIDTHS = [9.3, 0.55, 0.55, 0.55]
+
+
+def _fragment(fn):
+    """The table redraws by itself when you filter or change page (fast); the rest of the page is not asked again."""
+    f = getattr(st, "fragment", None)
+    return f(fn) if f else fn
+
+
+def _refresh():
+    try:
+        st.rerun(scope="fragment")
+    except TypeError:  # an older Streamlit: redraw everything
+        st.rerun()
 
 
 def needs_me(jobs):
@@ -94,39 +113,57 @@ def table_of(view, money):
 
 
 def open_job(job_id, mode):
-    """The eye opens the job to read (view); the pencil opens it to work on it (edit)."""
+    """The eye (view) and the pencil (edit) take you to the page of that job."""
     st.session_state.jb_open, st.session_state.jb_mode = int(job_id), mode
     st.session_state.jb_ver = st.session_state.get("jb_ver", 0) + 1
+    try:
+        st.rerun(scope="app")
+    except TypeError:
+        st.rerun()
 
 
 def job_rows(page_view, unread):
-    """The list: one line per job like a register book. Eye = read the job. Pencil = work on it (only if there is something to do). Mail = email the customer the status."""
+    """One line per job like a register book. Eye = read the job. Pencil = work on it (only if there is something to do). Mail = email the customer the status."""
     st.markdown(ROW_CSS, unsafe_allow_html=True)
     head = st.columns(WIDTHS)
-    for col, label in zip(head, ["Date", "Family name", "First name", "Service", "Engineer", "Status", "", "", ""]):
-        col.markdown(f'<div class="jr-h">{label}</div>', unsafe_allow_html=True)
+    head[0].markdown('<div class="jr-h"><span>Date</span><span>Family name</span><span>First name</span><span>Service</span><span>Engineer</span><span>Status</span></div>', unsafe_allow_html=True)
+    head[1].markdown('<div class="jr-h">&nbsp;</div>', unsafe_allow_html=True)
     for r in page_view.itertuples():
         job = {"status": r.status, "assigned_to": r.assigned_to, "service": r.service, "balance": r.balance}
         cells = st.columns(WIDTHS, vertical_alignment="center")
-        cells[0].markdown(f'<div class="jr">{when(r.created_at)}</div>', unsafe_allow_html=True)
-        cells[1].markdown(f'<div class="jr"><b>{html.escape(r.surname.upper())}</b></div>', unsafe_allow_html=True)
-        hint = "<br><small>no email</small>" if not r.customer_email else ""
-        cells[2].markdown(f'<div class="jr">{html.escape(r.firstname)}{hint}</div>', unsafe_allow_html=True)
-        cells[3].markdown(f'<div class="jr">{html.escape(r.service)}</div>', unsafe_allow_html=True)
-        cells[4].markdown(f'<div class="jr">{html.escape(r.assigned_to) if r.assigned_to else "N/A"}</div>', unsafe_allow_html=True)
         n = unread.get(int(r.id), 0)
         news = f'<br><span class="newu">\u25cf {n} new</span>' if n else ""
-        cells[5].markdown(f'<div class="jr">{pill(r.status)}{news}</div>', unsafe_allow_html=True)
-        if cells[6].button(":material/visibility:", key=f"jb_eye{r.id}", help="View this job"):
+        hint = "<br><small>no email</small>" if not r.customer_email else ""
+        cells[0].markdown(
+            f'<div class="jr"><span>{when(r.created_at)}</span><span><b>{html.escape(r.surname.upper())}</b></span><span>{html.escape(r.firstname)}{hint}</span>'
+            f'<span>{html.escape(r.service)}</span><span>{html.escape(r.assigned_to) if r.assigned_to else "N/A"}</span><span>{pill(r.status)}{news}</span></div>',
+            unsafe_allow_html=True)
+        if cells[1].button(":material/visibility:", key=f"jb_eye{r.id}", help="View this job"):
             open_job(r.id, "view")
-        if can_act(job) and cells[7].button(":material/edit:", key=f"jb_pen{r.id}", help="Work on this job: review, send back, assign, add information..."):
+        if can_act(job) and cells[2].button(":material/edit:", key=f"jb_pen{r.id}", help="Work on this job: review, send back, assign, add information..."):
             open_job(r.id, "edit")
-        if can("notify", job) and cells[8].button(":material/mail:", key=f"jb_mail{r.id}", help="Email the customer the status of this job"):
+        if can("notify", job) and cells[3].button(":material/mail:", key=f"jb_mail{r.id}", help="Email the customer the status of this job"):
             st.session_state.jb_msg = email_status(int(r.id))
-            st.rerun()
+            _refresh()
 
 
+def page_numbers(page, pages):
+    """[1, 2, 3, 4, 5, '...', 138] around the current page (page starts at 0)."""
+    if pages <= 7:
+        return list(range(1, pages + 1))
+    cur = page + 1
+    if cur <= 4:
+        return [1, 2, 3, 4, 5, "...", pages]
+    if cur >= pages - 3:
+        return [1, "...", pages - 4, pages - 3, pages - 2, pages - 1, pages]
+    return [1, "...", cur - 1, cur, cur + 1, "...", pages]
+
+
+@_fragment
 def jobs_tab():
+    # filters you chose before opening a job are still there when you come back
+    for k, v in st.session_state.get("jb_saved", {}).items():
+        st.session_state.setdefault(k, v)
     jobs = load_jobs()
     msg = st.session_state.pop("jb_msg", None)
     if msg:
@@ -134,7 +171,7 @@ def jobs_tab():
     if jobs.empty:
         return st.info("There are no jobs yet." if sees_all_jobs() else "No job has been given to you yet.")
     money = sees_money()
-    unread = unread_by_job()
+    unread = {int(i): int(n) for i, n in zip(jobs.id, jobs.unread) if n}
     st.caption(summary_line(jobs, unread))
     q = search_box("jb_q", "Search", "Job number, name, email, phone, title, engineer...")
     a, b, c, d = st.columns(4)
@@ -144,6 +181,7 @@ def jobs_tab():
     who = c.selectbox("Engineer", engineers, key="jb_eng") if sees_all_jobs() else "All engineers"
     months = ["All months"] + sorted({str(x)[:7] for x in jobs.created_at}, reverse=True)
     month = d.selectbox("Month", months, key="jb_month")
+    st.session_state["jb_saved"] = {"jb_q": q, "jb_show": show, "jb_service": service, "jb_eng": who, "jb_month": month, "jb_size": st.session_state.get("jb_size", PAGE_SIZES[1])}
     view = apply_show(jobs, show, unread)
     if service != "All services":
         view = view[view.service == service]
@@ -154,50 +192,77 @@ def jobs_tab():
     if month != "All months":
         view = view[view.created_at.astype(str).str[:7] == month]
     view = match(view, ["job_no", "customer", "phone", "customer_email", "title", "assigned_to", "status", "stage"], q).reset_index(drop=True)
-    sig = (q, show, service, who, month)
+    size = int(st.session_state.get("jb_size", PAGE_SIZES[1]).split()[0])
+    sig = (q, show, service, who, month, size)
     if st.session_state.get("jb_sig") != sig:  # a new search or filter starts on the first page
         st.session_state.jb_sig, st.session_state.jb_page = sig, 0
-    pages = max(1, -(-len(view) // PAGE_SIZE))
+    pages = max(1, -(-len(view) // size))
     page = min(st.session_state.get("jb_page", 0), pages - 1)
-    st.caption(f"{len(view)} job(s). Eye: read the job. Pencil: work on it. Mail: email the customer the status.")
-    if unread and st.button("Mark all updates as read", key="jb_readall"):
-        mark_all_read()
-        st.rerun()
-    job_rows(view.iloc[page * PAGE_SIZE:(page + 1) * PAGE_SIZE], unread)
-    if pages > 1:
-        a, b, c = st.columns([1, 3, 1])
-        if a.button("\u2039 Previous", key="jb_prev", disabled=page == 0):
+    with st.container(border=True):
+        t1, t2 = st.columns([9, 1], vertical_alignment="center")
+        t1.markdown(f'<span class="jtitle">All jobs ({len(view)})</span> &nbsp; <small style="color:#8a96a3">eye: read \u00b7 pencil: work on it \u00b7 mail: email the customer the status</small>', unsafe_allow_html=True)
+        if len(view):
+            t2.download_button(":material/download:", to_excel({"Jobs": table_of(view, money)}), f"jobs_{date.today()}.xlsx", mime=XLSX, key="dl_jobs", help="Download Excel")
+        if unread and st.button("Mark all updates as read", key="jb_readall"):
+            mark_all_read()
+            _refresh()
+        job_rows(view.iloc[page * size:(page + 1) * size], unread)
+        f1, f2, f3, f4 = st.columns([2.2, 5, 1.6, 1.4], vertical_alignment="center")
+        f1.markdown(f'<small>Total {len(view)} records</small>', unsafe_allow_html=True)
+        nums = page_numbers(page, pages)
+        row = f2.columns([0.7] + [0.6] * len(nums) + [0.7])
+        if row[0].button("\u2039", key="jb_prev", disabled=page == 0):
             st.session_state.jb_page = page - 1
-            st.rerun()
-        b.markdown(f'<div style="text-align:center;padding-top:6px">Page {page + 1} of {pages}</div>', unsafe_allow_html=True)
-        if c.button("Next \u203a", key="jb_next", disabled=page >= pages - 1):
+            _refresh()
+        for col, n in zip(row[1:-1], nums):
+            if n == "...":
+                col.markdown("\u2026")
+            elif col.button(str(n), key=f"jb_p{n}", type="primary" if n == page + 1 else "secondary"):
+                st.session_state.jb_page = n - 1
+                _refresh()
+        if row[-1].button("\u203a", key="jb_next", disabled=page >= pages - 1):
             st.session_state.jb_page = page + 1
-            st.rerun()
-    if len(view):
-        st.download_button(":material/download: Download Excel", to_excel({"Jobs": table_of(view, money)}), f"jobs_{date.today()}.xlsx", mime=XLSX, key="dl_jobs")
+            _refresh()
+        f3.selectbox("Rows", PAGE_SIZES, index=PAGE_SIZES.index(st.session_state.get("jb_size", PAGE_SIZES[1])), key="jb_size", label_visibility="collapsed")
+        go = f4.number_input("Go to", min_value=1, max_value=pages, value=page + 1, step=1, key=f"jb_goto{page}", label_visibility="collapsed")
+        if int(go) - 1 != page:
+            st.session_state.jb_page = int(go) - 1
+            _refresh()
+
+
+def job_screen():
+    """The page of one job: opened by the eye (read) or the pencil (work). A button takes you back to the table with your filters as you left them."""
+    if st.button(":material/arrow_back: Back to the jobs", key="jb_back"):
+        st.session_state.jb_open = None
+        st.rerun()
     jid = st.session_state.get("jb_open")
-    if jid and jid in set(jobs.id.astype(int)):
+    if jid in set(load_jobs().id.astype(int)):
         run_section("inchars.jobs.page", "job_panel", jid, "jb")
+    else:
+        st.warning("This job is not available to you.")
 
 
 def jobs_page():
     st.markdown(DASH_CSS, unsafe_allow_html=True)
+    if st.session_state.get("jb_open"):  # a job is open: show only that job, like its own page
+        return run_section("inchars.jobs.page", "job_screen")
     try:
-        n = sum(unread_by_job().values())
+        n = int(load_jobs().unread.sum())
     except Exception:  # noqa: BLE001  (the number is a nicety: the page works without it)
         n = 0
     names = [f"Jobs ({n} new)" if n else "Jobs"] + (["New job"] if has(CEO, RECEPTIONIST) else []) + (["Payments"] if sees_money() else [])
-    tabs = dict(zip(names, st.tabs(names)))
-    with tabs[names[0]]:
+    section = names[0] if len(names) == 1 else st.radio("Section", names, horizontal=True, key="jb_section", label_visibility="collapsed")
+    if section not in names:  # the number in the label changed
+        section = names[0]
+    if section == names[0]:  # only the section you look at is loaded: fast
         run_section("inchars.jobs.page", "jobs_tab")
-    if "New job" in tabs:
-        with tabs["New job"]:
-            run_section("inchars.jobs.page", "new_job_form")
-    if "Payments" in tabs:
-        with tabs["Payments"]:
-            run_section("inchars.jobs.extras", "payments_tab")
+    elif section == "New job":
+        run_section("inchars.jobs.page", "new_job_form")
+    else:
+        run_section("inchars.jobs.extras", "payments_tab")
 
 
+# ======================================================================
 # from services/new_job.py
 # ======================================================================
 
@@ -436,11 +501,7 @@ def job_panel(job_id, p="jb"):
     money = sees_money()
     mode = st.session_state.get(p + "_mode", "view")
     with st.container(border=True):
-        a, b = st.columns([6, 1])
-        a.markdown(f"### {j.job_no} · {j.title}" + ("" if mode == "edit" else "  (view)"))
-        if b.button("Close", key=K(f"{p}close{int(j.id)}")):
-            st.session_state[p + "_open"] = None
-            st.rerun()
+        st.markdown(f"### {j.job_no} · {j.title}" + ("" if mode == "edit" else "  (view)"))
         st.caption(f"{j.service} · {j.customer} · {j.customer_email or 'no email'} · {j.phone or 'no phone'}")
         news = job_updates(int(j.id))
         fresh = news[news.read_at.isna()] if len(news) else news

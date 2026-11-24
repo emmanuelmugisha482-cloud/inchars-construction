@@ -9,7 +9,7 @@ from datetime import date, datetime
 from functools import wraps
 
 from inchars.accounts import has, send_email, smtp_conf
-from inchars.database import IntegrityErrors, conn, df
+from inchars.database import IntegrityErrors, cached, conn, df
 from inchars.settings import CEO, EMAIL_RE, ENGINEER, RECEPTIONIST
 
 
@@ -178,6 +178,7 @@ def can_open_deliverable(job):
 
 
 # ---------------------------------------------------------------- customers
+@cached(ttl=8)
 def load_customers():
     return df("""SELECT c.id, c.name AS "Name", c.phone AS "Phone", c.email AS "Email", c.note AS "Note",
                  (SELECT COUNT(*) FROM jobs j WHERE j.customer_id=c.id) AS "Jobs" FROM customers c ORDER BY c.name""")
@@ -244,18 +245,21 @@ def fetch_job(c, job_id):
     return d
 
 
+@cached(ttl=8)
 def load_jobs():
     """Every job the signed-in person may see, with the customer, the money (fee, paid, balance) and what we still do not know."""
     j = df("""SELECT j.id, j.job_no, j.created_at, j.service, j.title, j.description, j.status, j.stage, j.gov_ref, j.fee, j.due_on,
               j.assigned_to, j.created_by, j.ready_at, j.collected_at, j.collected_by, j.returned_reason, c.id AS customer_id, c.name AS customer,
+              (SELECT COUNT(*) FROM job_notices n WHERE n.job_id=j.id AND n.to_user=? AND n.read_at IS NULL) AS unread,
               c.phone AS phone, c.email AS customer_email,
               COALESCE((SELECT SUM(p.amount) FROM job_payments p WHERE p.job_id=j.id), 0) AS paid
-              FROM jobs j JOIN customers c ON c.id=j.customer_id ORDER BY j.id DESC""")
+              FROM jobs j JOIN customers c ON c.id=j.customer_id ORDER BY j.id DESC""", (st.session_state.user,))
     if not sees_all_jobs():
         j = j[j.assigned_to == st.session_state.user]
     j = j.reset_index(drop=True)
     for col in ("description", "stage", "gov_ref", "due_on", "assigned_to", "ready_at", "collected_at", "collected_by", "customer_email", "phone", "returned_reason"):
         j[col] = j[col].fillna("")  # empty text instead of None, so the screens can test it simply
+    j["unread"] = pd.to_numeric(j.unread).fillna(0).astype(int)
     j["fee"] = pd.to_numeric(j.fee).fillna(0)
     j["paid"] = pd.to_numeric(j.paid).fillna(0)
     j["balance"] = j.fee - j.paid
@@ -269,6 +273,7 @@ def load_jobs():
     return j
 
 
+@cached(ttl=8)
 def load_engineers():
     return df("SELECT DISTINCT u.username FROM users u JOIN user_roles r ON r.user_id=u.id WHERE r.role=? ORDER BY u.username", (ENGINEER,)).username.tolist()
 
@@ -304,6 +309,7 @@ def load_notices(limit=40):
               (st.session_state.user, int(limit)))
 
 
+@cached(ttl=8)
 def unread_count():
     r = df("SELECT COUNT(*) AS n FROM job_notices WHERE to_user=? AND read_at IS NULL", (st.session_state.user,))
     return int(r.n.iloc[0])

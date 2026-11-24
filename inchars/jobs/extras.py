@@ -6,7 +6,7 @@ import streamlit as st
 from datetime import date, timedelta
 
 from inchars.accounts import has
-from inchars.database import conn, df
+from inchars.database import cached, conn, df
 from inchars.jobs.data import (
     MAX_FILE_MB,
     OPEN_STATUSES,
@@ -197,6 +197,7 @@ def files_section(j, p):
 # from services/money.py
 # ======================================================================
 
+@cached(ttl=8)
 def load_payments(job_id=None):
     sql = """SELECT p.id, p.job_id, j.job_no, c.name AS customer, p.paid_on AS date, p.amount, p.method, p.reference, p.received_by, p.note
              FROM job_payments p JOIN jobs j ON j.id=p.job_id JOIN customers c ON c.id=j.customer_id"""
