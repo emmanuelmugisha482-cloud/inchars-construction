@@ -76,7 +76,7 @@ does not use this page. **Money of the jobs is seen by the CEO and the Reception
    - **Revert** with a reason: the job becomes **Reverted** and goes back to the engineer, who corrects it and sends it again. The customer is not told.
 5. The **Receptionist** hands over the document when paid in full (the CEO can release with a reason): **Collected**.
 
-**One table does everything** (like a register book): date, family name, first name, service, engineer, a coloured status label, and three buttons on each row:
+**One table does everything** (like a register book; the footer shows the total, page numbers, rows per page and Go to). The eye and the pencil take you to the **page of that job**, with a Back button that returns to the table with your filters as you left them. Each row has: date, family name, first name, service, engineer, a coloured status label, and three buttons:
 - the **eye** opens the job to read: what the customer asked for, the customer's details, the updates, and everything that happened;
 - the **pencil** opens it to work on it: confirm or revert the work, give it to an engineer, add the customer's information, change the details, attach files, see the money
   (CEO, Receptionist) - an engineer gets the pencil only on jobs he or she has something to do on;
@@ -113,6 +113,13 @@ For Gmail you must turn on 2-step verification and create an **App Password** (y
 - Files are kept in the database, up to 15 MB each. If they become big or many, only the file functions in `inchars/jobs/extras.py` need to change.
 - Receptionist and Engineer money requests have two categories: **Office use** and **Personal use**.
 - Jobs made before this update are moved automatically (New or Returned -> With CEO; Assigned or In progress -> With engineer).
+
+## Speed
+
+The app asks the database for lists (jobs, expenses, materials...) and keeps each answer for a few seconds for the person who asked (`cached` in `inchars/database.py`).
+A person's own change always shows at once; other people's changes appear within 8 to 20 seconds. The Jobs page loads only the section you look at, and its table redraws
+by itself when you filter or change page. If the app still feels slow, the main cause is distance: put the database (Neon/Supabase) and the Streamlit app in the region nearest
+to Kigali that your plan offers (Europe is usually nearest), and keep the database from sleeping (Neon: Settings > Compute > turn off "Scale to zero", or accept a short wait after a quiet period).
 
 ## If something breaks (it cannot stop everything)
 
