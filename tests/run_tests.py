@@ -121,7 +121,7 @@ check("optional: customer document kept", app.add_files(jid, "Customer document"
 # ================= 3. the CEO assigns; the engineer works =================
 sign_in("ceo")
 check("assign to someone who is not an engineer is refused", app.assign_job(jid, "acc", "2026-12-10") == "Choose an engineer.")
-check("the CEO gives the job to the engineer", app.assign_job(jid, "eng", "2026-12-12") is None and job(no).status == "With engineer" and job(no).assigned_to == "eng")
+check("the CEO gives the job to the engineer", app.assign_job(jid, "eng", "2026-12-12") is None and job(no).status == "Assigned" and job(no).assigned_to == "eng")
 check("the engineer is told in the Inbox", any(no in x for x in inbox("eng")))
 check("the engineer is also emailed (the account has an address)", any(t == "eng@inchars.rw" and no in s for t, s, b in sent) or True)
 sign_in("eng2")
@@ -137,12 +137,12 @@ check("the engineer asks the customer for something", app.change_status(jid, "wa
 check("the customer is emailed what is needed", any("Land title / UPI" in b and "Hello Yvona" in b for s, b in mails_to(ALICE)))
 sign_in("rec")
 check("the Receptionist is told", any("Copy of ID card" in x for x in app.load_notices().Message))
-check("the Receptionist records that the customer answered", app.change_status(jid, "resume", "ID brought") is None and job(no).status == "With engineer")
+check("the Receptionist records that the customer answered", app.change_status(jid, "resume", "ID brought") is None and job(no).status == "Assigned")
 sign_in("eng")
 check("the engineer cannot confirm his own work", app.change_status(jid, "confirm") == "You cannot do this on this job now.")
 check("the engineer attaches the finished PDF (optional); a non-PDF is refused", app.add_files(jid, "Deliverable", [("plans.pdf", PDF)]) is None and "only PDF" in (app.add_files(jid, "Deliverable", [("p.docx", b"x" * 99)]) or ""))
 n_before = len(sent)
-check("the engineer sends the work to the CEO", app.change_status(jid, "submit", "Plans are finished") is None and job(no).status == "In review")
+check("the engineer sends the work to the CEO", app.change_status(jid, "submit", "Plans are finished") is None and job(no).status == "Done")
 check("the customer is NOT emailed yet", len([1 for t, s, b in sent[n_before:] if t == ALICE]) == 0)
 check("the CEO is told it waits for his check", any(no in x and "check" in x for x in inbox("ceo")))
 
@@ -155,7 +155,7 @@ check("the engineer is told, with the reason", any(no in x and "SENT BACK" in x 
 check("the customer is not told about a revert", len([1 for t, s, b in sent[n_before:] if t == ALICE]) == 0)
 check("the reverted job is with the engineer again and can be sent again", app.change_status(jid, "submit", "Corrected") is None if False else True)
 sign_in("eng")
-check("the engineer corrects and sends it again", app.change_status(jid, "submit", "Measurements corrected") is None and job(no).status == "In review")
+check("the engineer corrects and sends it again", app.change_status(jid, "submit", "Measurements corrected") is None and job(no).status == "Done")
 
 # ================= 6. the CEO confirms: it goes to the Receptionist and the customer is emailed =================
 sign_in("ceo")
@@ -163,7 +163,7 @@ check("the CEO confirms the work", app.change_status(jid, "confirm") is None and
 ready = [(s, b) for s, b in mails_to(ALICE) if "ready" in s.lower()]
 check("the customer is emailed that the work is ready, with the balance", len(ready) == 1 and "Hello Yvona" in ready[0][1] and "400,000 Frw" in ready[0][1])
 check("the Receptionist is told it is confirmed", any(no in x and "CONFIRMED" in x for x in inbox("rec")))
-check("the history shows each step", {"Given to an engineer", "Sent to the CEO", "Reverted by the CEO", "Confirmed by the CEO"} <= set(history(jid).What))
+check("the history shows each step", {"Given to an engineer", "Marked as done", "Reverted by the CEO", "Confirmed by the CEO"} <= set(history(jid).What))
 
 # ================= 7. the customer comes, pays; the Receptionist hands over =================
 sign_in("rec")
@@ -171,21 +171,21 @@ row = app.load_jobs().query("id == @jid").iloc[0]
 check("balance is 400,000", row.balance == 400000)
 check("the Receptionist cannot hand it over while unpaid", "not paid in full" in (app.change_status(jid, "collect") or ""))
 check("the Receptionist cannot open the PDF while unpaid", not app.can_open_deliverable(row))
-check("payment above the balance is refused", "more than the balance" in (app.add_payment(jid, 500000, "Cash", "", "2026-11-16") or ""))
-check("the Receptionist records the payment", app.add_payment(jid, 400000, "Cash", "R-55", "2026-11-16") is None)
+check("payment above the balance is refused", "more than the balance" in (app.add_payment(jid, 500000, "Mobile money", "", "2026-11-16") or ""))
+check("the Receptionist records the payment", app.add_payment(jid, 400000, "Mobile money", "R-55", "2026-11-16") is None)
 row = app.load_jobs().query("id == @jid").iloc[0]
 check("paid in full and the PDF opens", row.balance == 0 and app.can_open_deliverable(row))
 check("the Receptionist hands over the document", app.change_status(jid, "collect") is None and job(no).status == "Collected")
 check("only the CEO can reopen", app.change_status(jid, "reopen", "x") == "You cannot do this on this job now.")
 sign_in("ceo")
-check("the CEO reopens with a reason", app.change_status(jid, "reopen", "Customer wants a change") is None and job(no).status == "With engineer")
+check("the CEO reopens with a reason", app.change_status(jid, "reopen", "Customer wants a change") is None and job(no).status == "Assigned")
 
 # ================= 8. the engineer never sees money =================
 sign_in("eng")
 mine = app.load_jobs()
 check("the engineer's job list has no money at all", len(mine) >= 1 and (mine.fee == 0).all() and (mine.paid == 0).all() and (mine.balance == 0).all())
 check("the engineer sees no payments", app.load_payments().empty and app.load_payments(jid).empty)
-check("the engineer cannot record or delete a payment", app.add_payment(jid, 1000, "Cash", "", "2026-11-16") == "You cannot record a payment on this job." and "Only the CEO" in app.delete_payment(1))
+check("the engineer cannot record or delete a payment", app.add_payment(jid, 1000, "Mobile money", "", "2026-11-16") == "You cannot record a payment on this job." and "Only the CEO" in app.delete_payment(1))
 sign_in("acc")
 check("the accountant does not see the jobs", app.load_jobs().empty and app.load_payments().empty)
 sign_in("ceo")
@@ -269,7 +269,7 @@ for who in ("ceo", "acc", "rec", "eng"):
 sign_in("eng"); st.session_state.jb_open = j3; txt = show_page("jobs")
 check("the engineer's job page shows no money", "Fee" not in txt and "Balance" not in txt and "Money" not in txt)
 sign_in("rec"); st.session_state.jb_open = j3; txt = show_page("jobs")
-check("the Receptionist's job page shows the balance", "Balance" in txt)
+check("the Receptionist's job page has no money card (the amount is in the table)", "Balance" not in txt)
 sign_in("ceo"); st.session_state.jb_open = None
 LOG.clear(); OVERRIDE["jb_show"] = "All"; txt = show_page("jobs"); OVERRIDE.clear()
 check("the list shows the family name in capitals and the coloured status", any("DUSENGIMANA" in str(l[1]) for l in LOG) and any("pill" in str(l[1]) for l in LOG))
@@ -295,7 +295,7 @@ sign_in("eng"); st.session_state.jb_open = None; LOG.clear(); OVERRIDE["jb_show"
 check("the engineer has no mail button", not any(l[0] == "button" and str(l[2]).startswith("jb_mail") for l in LOG))
 check("the engineer has a table with eye buttons", any(l[0] == "button" and str(l[2]).startswith("jb_eye") for l in LOG))
 mine = app.load_jobs()
-check("the engineer gets the pencil only where there is something to do", all(app.can_act({"status": r.status, "assigned_to": r.assigned_to, "service": r.service}) for r in mine[mine.status.isin(["With engineer", "Reverted"])].itertuples()))
+check("the engineer gets the pencil only where there is something to do", all(app.can_act({"status": r.status, "assigned_to": r.assigned_to, "service": r.service}) for r in mine[mine.status.isin(["Assigned", "Reverted"])].itertuples()))
 st.session_state.jb_open = None
 
 # ---- the mail button: email the customer the status of the job ----
@@ -341,6 +341,46 @@ check("Show, Service, Engineer and Month are dropdowns", {"Show", "Service", "En
 check("every KPI card has the same light-blue look", 'class="kc"' in app.kpi("A", 1, "d", "red") and 'class="kc"' in app.kpi("A", 1, "d", "green") and ".kc.red" not in app.DASH_CSS and ".kc.amber" not in app.DASH_CSS)
 import inspect
 check("choices are dropdowns, not tap buttons", "pills" not in inspect.getsource(app.pick))
+
+# ---- this round: Done, Assigned, no Cash, shared contacts, payment column, PDF, no money for the Receptionist ----
+check("'Cash' is no longer a payment method", "Cash" not in app.PAY_METHODS and "Choose how" in (app.add_payment(jid, 1000, "Cash", "", "2026-11-16") or "Choose how"))
+sign_in("rec")
+s1, _ = app.save_customer("SHARE One", "0788 000 111", "shared@example.rw")
+s2, e2 = app.save_customer("SHARE Two", "0788 000 111", "shared@example.rw")
+check("a new customer may share the phone and email of an existing customer", s1 and s2 and not e2, e2)
+check("an existing customer's phone and email can be changed", app.update_customer_info(s1, "0788 555 000", "new@example.rw") is None
+      and app.load_customers().query("id == @s1").iloc[0].Email == "new@example.rw" and app.load_customers().query("id == @s1").iloc[0].Phone == "+250788555000")
+check("changing to a number another customer already has is allowed", app.update_customer_info(s1, "0788 000 111", "") is None)
+jd, nd, _ = app.create_job(s2, "Other", "Done flow", "", 100000, "2026-12-30", deposit=100000, method="Mobile money")
+sign_in("ceo"); app.assign_job(jd, "eng", "2026-12-30")
+check("a job given to an engineer shows the status 'Assigned'", job(nd).status == "Assigned")
+sign_in("eng")
+app.add_files(jd, "Deliverable", [("final.pdf", PDF)])
+check("the engineer marks it as done: the status is 'Done'", app.change_status(jd, "submit", "finished") is None and job(nd).status == "Done")
+check("the CEO is told it was marked as done", any(nd in x and "DONE" in x for x in inbox("ceo")))
+sign_in("ceo")
+check("the CEO confirms: the status is 'Ready' and the customer is emailed", app.change_status(jd, "confirm") is None and job(nd).status == "Ready" and bool(mails_to("shared@example.rw")))
+check("the Receptionist sees it is ready", any(nd in x and "CONFIRMED" in x for x in inbox("rec")))
+sign_in("rec"); LOG.clear(); OVERRIDE["jb_show"] = "All"; show_page("jobs"); OVERRIDE.clear()
+btn = [l for l in LOG if l[0] == "button"]
+check("the table has a Payment column: paid jobs show 'Paid', others show what is still to pay", any("Paid" in str(l[1]) for l in btn) and any("Frw to pay" in str(l[1]) for l in btn))
+check("a paid, ready job gets the PDF icon for the final document", any(l[0] == "download" or "picture_as_pdf" in str(l[1]) for l in LOG))
+check("the Receptionist's dashboard cards have no money", not any("Frw" in c or "to pay" in c.lower() for c in app.service_cards(app.load_jobs(), app.load_payments(), "reception")))
+OVERRIDE["jb_section"] = "Payments"; LOG.clear(); show_page("jobs"); OVERRIDE.clear()
+check("the Payments section is for the CEO only", table_drawn())
+sign_in("eng"); LOG.clear(); OVERRIDE["jb_show"] = "All"; show_page("jobs"); OVERRIDE.clear()
+check("the engineer's table has no payment column and no PDF icon", not any("Frw to pay" in str(l[1]) or "picture_as_pdf" in str(l[1]) for l in LOG if l[0] in ("button", "download")))
+# the pencil on the payment column opens the Money part
+sign_in("rec"); st.session_state.jb_open = None
+jx = int(app.load_jobs().query("balance > 0 and status != 'Cancelled'").id.iloc[0])
+PRESS.add(f"jb_paydue{jx}"); OVERRIDE["jb_show"] = "All"
+try:
+    show_page("jobs")
+except stub.Rerun:
+    pass
+PRESS.clear(); OVERRIDE.clear()
+check("clicking what is to pay opens the job on the Money part", st.session_state.get("jb_open") == jx and st.session_state.get("jb_part") == "Money")
+st.session_state.jb_open = None
 
 # ---- the table footer, the job page, and speed ----
 check("page numbers like the example: 1 2 3 4 5 ... last", app.page_numbers(0, 138) == [1, 2, 3, 4, 5, "...", 138] and app.page_numbers(60, 138) == [1, "...", 60, 61, 62, "...", 138]
@@ -402,7 +442,7 @@ sign_in("rec")
 mugabo = int(app.df("SELECT id FROM customers WHERE name='MUGABO Ben'").id.iloc[0])
 labels = {f"{r.Name} \u00b7 {r.Email or 'no email'}" + ("" if r.Phone else " \u00b7 no phone"): int(r.id) for r in app.load_customers().itertuples()}
 pick_label = [l for l, i in labels.items() if i == mugabo][0]
-OVERRIDE.update({k("nj_mode"): "Existing customer", k("nj_c"): pick_label, k("nj_xemail"): "ben@example.rw", k("nj_s"): "Consultancy", k("nj_t"): "Second job", k("nj_f"): 1000})
+OVERRIDE.update({k("nj_mode"): "Existing customer", k("nj_c"): pick_label, k("nj_xemail" + str(mugabo)): "ben@example.rw", k("nj_s"): "Consultancy", k("nj_t"): "Second job", k("nj_f"): 1000})
 PRESS.add(k("nj_go"))
 try:
     app.new_job_form()
