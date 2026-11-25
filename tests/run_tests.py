@@ -533,15 +533,65 @@ check("a bug in the New job section does not stop the Jobs table", table_drawn()
 page_mod.new_job_form = real_form
 st.session_state.jb_open = None
 
-# the System check page finds a broken file
-health = modules["inchars.health"]
-health.importlib.import_module = import_breaking("inchars.jobs.extras")
-parts = health.check_parts()
-row = parts[parts.File == "inchars/jobs/extras.py"]
-check("System check lists a broken file as FAILED, first", len(row) == 1 and row.Status.iloc[0] == "FAILED" and parts.iloc[0].Status == "FAILED")
-check("System check says OK for the working files", (parts.Status == "OK").sum() == len(health.MODULES) - 1)
-health.importlib.import_module = real_import
-check("System check lists every file of the app", len(health.MODULES) == 13)
+# old status names and unknown statuses can never break a screen
+jd_mod = modules["inchars.jobs.data"]
+with app.conn() as c:
+    c.execute("UPDATE jobs SET status='In review' WHERE id=?", (jid,))
+jd_mod._migrated = False
+sign_in("ceo")
+check("an old status name is moved to the current one (once, in the database)", app.load_jobs().query("id == @jid").iloc[0].status == "Done" and job(no).status == "Done")
+with app.conn() as c:
+    c.execute("UPDATE jobs SET status='Weird' WHERE id=?", (jid,))
+sign_in("rec"); LOG.clear(); st.session_state.jb_open = None
+show_page("dashboard")
+check("an unknown status does not stop the services dashboard (the KeyError of the screenshot)", not any("stopped with an error" in str(l[1]) for l in LOG if l[0] == "error"))
+sign_in("ceo"); LOG.clear(); show_page("dashboard")
+check("... nor the CEO's dashboard", not any("stopped with an error" in str(l[1]) for l in LOG if l[0] == "error"))
+with app.conn() as c:
+    c.execute("UPDATE jobs SET status='Collected' WHERE id=?", (jid,))
+
+# the table: names and phone, solid coloured icons
+sign_in("ceo"); LOG.clear(); OVERRIDE["jb_show"] = "All"; show_page("jobs"); OVERRIDE.clear()
+check("the table shows the names and the phone number (no family name / first name columns)", any("DUSENGIMANA Yvona" in str(l[1]) and "+250788111222" in str(l[1]) for l in LOG)
+      and any("<span>Names</span><span>Phone</span>" in str(l[1]) for l in LOG) and not any("Family name" in str(l[1]) for l in LOG if l[0] == "md"))
+check("the icons are solid coloured pictures (eye, pencil, message, PDF)", all(f"st-key-jb_{n}" in app.ROW_CSS for n in ("eye", "pen", "mail", "pdf")) and app.ROW_CSS.count("data:image/svg+xml") == 4)
+check("the Excel download has Names and Phone", {"Names", "Phone"} <= set(app.table_of(app.load_jobs(), True).columns))
+
+# ---- Start fresh: one button deletes everything except the users ----
+sign_in("rec")
+check("only the CEO can delete everything", app.wipe_everything_but_users() == "Only the CEO can do this.")
+sign_in("acc")
+check("nobody but the CEO has the Start fresh page", not any(k == "health" for k, _, _ in app.allowed_pages()))
+sign_in("ceo")
+check("before the button is used, the CEO has the Start fresh page (System check is gone)", any(k == "health" and lbl == "Start fresh" for k, lbl, _ in app.allowed_pages()))
+users_before = app.df("SELECT username, password_hash FROM users ORDER BY username").values.tolist()
+roles_before = app.df("SELECT user_id, role FROM user_roles ORDER BY user_id, role").values.tolist()
+check("there is test data to delete", len(app.df("SELECT 1 FROM jobs")) > 0 and len(app.df("SELECT 1 FROM customers")) > 0 and len(app.df("SELECT 1 FROM job_events")) > 0)
+LOG.clear(); show_page("health")
+check("the page explains what is deleted and what is kept", any("Deleted" in str(l[1]) for l in LOG) and any("Kept" in str(l[1]) for l in LOG))
+OVERRIDE["fresh_word"] = "delete me"; PRESS.add("fresh_go")
+try:
+    show_page("health")
+except stub.Rerun:
+    pass
+PRESS.clear(); OVERRIDE.clear()
+check("without typing DELETE nothing is deleted", len(app.df("SELECT 1 FROM jobs")) > 0)
+OVERRIDE["fresh_word"] = "DELETE"; PRESS.add("fresh_go")
+try:
+    show_page("health")
+except stub.Rerun:
+    pass
+PRESS.clear(); OVERRIDE.clear()
+gone = all(len(app.df(f"SELECT 1 FROM {t}")) == 0 for t in modules["inchars.health"].WIPE)
+check("everything is deleted: jobs, customers, payments, files, history, expenses, stock, money, fields", gone)
+check("the users, their passwords and their roles are kept", app.df("SELECT username, password_hash FROM users ORDER BY username").values.tolist() == users_before
+      and app.df("SELECT user_id, role FROM user_roles ORDER BY user_id, role").values.tolist() == roles_before)
+check("the page disappears from the menu after use", not any(k == "health" for k, _, _ in app.allowed_pages()))
+show_page("jobs")
+cnew, _ = app.save_customer("FRESH Start")
+jf, nf, _ = app.create_job(cnew, "Other", "First real job", "", 1000, "2026-12-30")
+check("job numbers start again from 0001", nf.endswith("-0001"))
+check("the page says it was already done if opened again", (lambda: (LOG.clear(), modules["inchars.health"].reset_page(), any("already" in str(l[1]) for l in LOG))[2])())
 
 # if the services tables cannot be created, the construction tables still are
 import tempfile

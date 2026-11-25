@@ -82,6 +82,8 @@ class STClass(W):
     def write(self, *a, **k): pass
     def error(self, t, *a, **k): LOG.append(("error", str(t)))
     def warning(self, t, *a, **k): LOG.append(("warning", str(t)))
+    def success(self, t, *a, **k): LOG.append(("success", str(t)))
+    def info(self, t, *a, **k): LOG.append(("info", str(t)))
     def caption(self, t, *a, **k): LOG.append(("caption", str(t)))
     def stop(self): raise Rerun()
 
