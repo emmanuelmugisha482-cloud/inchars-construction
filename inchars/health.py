@@ -1,98 +1,63 @@
-"""System check: shows which file works and which does not, and tests the email. Kept on its own so it opens even when other files are broken."""
+"""Start fresh: after testing, one button deletes every record and all the history, except the users, so the real data can start clean.
+Kept on its own file on purpose. Once it has been used, the page disappears from the menu (a note is kept in the table app_flags)."""
 
-import importlib
-import pandas as pd
+from datetime import datetime
+
 import streamlit as st
 
+from inchars.accounts import has
+from inchars.database import IS_PG, cached, conn, df
+from inchars.settings import CEO
+
+# every table that holds records or history. NOT in the list (they stay): users, user_roles, app_flags.
+WIPE = ["sites", "user_sites", "categories", "expenses", "funds", "reset_codes", "materials", "material_moves", "material_requests",
+        "money_categories", "money_requests", "money_ledger", "taxes", "debts", "debt_payments",
+        "customers", "jobs", "job_payments", "job_files", "job_file_data", "job_events", "job_notices"]
 
 
-MODULES = ["settings", "database", "accounts", "data", "widgets", "router", "construction.dashboard", "construction.materials", "construction.money",
-           "construction.admin", "jobs.data", "jobs.page", "jobs.extras"]  # every file of the app except this one and app.py
-
-
-def check_parts():
-    """Try to load every file of the app. Returns a table: File, Status, Detail."""
-    rows = []
-    for name in MODULES:
-        try:
-            importlib.import_module("inchars." + name)
-            rows.append({"File": "inchars/" + name.replace(".", "/") + ".py", "Status": "OK", "Detail": ""})
-        except Exception as e:  # noqa: BLE001
-            rows.append({"File": "inchars/" + name.replace(".", "/") + ".py", "Status": "FAILED", "Detail": f"{type(e).__name__}: {e}"})
-    out = pd.DataFrame(rows, columns=["File", "Status", "Detail"])
-    return out.sort_values(["Status", "File"], ascending=[True, True]).reset_index(drop=True)  # FAILED first
-
-
-def _show(table):
+@cached(ttl=15)
+def fresh_start_done():
+    """True once the button has been used (then the page is no longer in the menu)."""
     try:
-        st.dataframe(table, hide_index=True, width="stretch")
-    except TypeError:
-        st.dataframe(table, hide_index=True, use_container_width=True)
+        return len(df("SELECT value FROM app_flags WHERE name='fresh_start'")) > 0
+    except Exception:  # noqa: BLE001
+        return False
 
 
-def system_check_page():
-    st.caption("Checks that every part of the app can start. After an update, open this page first.")
-    parts = check_parts()
-    bad = int((parts.Status == "FAILED").sum())
-    if bad:
-        st.error(f"{bad} part(s) cannot start. The other parts still work. The most common cause after an update is a file that was not "
-                 "uploaded or not replaced: upload the whole `inchars` folder again, then reboot the app.")
-    else:
-        st.success(f"All {len(parts)} parts of the app can start.")
-    _show(parts)
-    st.subheader("Database")
-    try:
-        from inchars.database import df
-        df("SELECT 1 AS ok")
-        st.markdown("Database: **connected**")
-    except Exception as e:  # noqa: BLE001
-        st.error(f"Database: not reachable ({type(e).__name__}).")
-    for table, label in (("jobs", "Jobs (services)"), ("expenses", "Expenses"), ("material_requests", "Material requests")):
-        try:
-            n = int(df(f"SELECT COUNT(*) AS n FROM {table}").n.iloc[0])
-            st.markdown(f"{label}: table is there, {n:,} record(s)")
-        except Exception:  # noqa: BLE001
-            st.warning(f"{label}: the table is missing or cannot be read.")
-    st.subheader("Email")
-    try:
-        mail_part()
-    except Exception as e:  # noqa: BLE001
-        st.error(f"The email check could not run ({type(e).__name__}: {e}). The rest of the app works.")
-
-
-def mail_part():
-    from inchars.accounts import send_email, smtp_conf
-    cfg = smtp_conf()
-    if not cfg:
-        st.warning("Email is **not set up**: customers and staff are not emailed.")
-        try:
-            given = dict(st.secrets["smtp"])
-        except Exception:  # noqa: BLE001
-            given = {}
-        if given:
-            missing = [k for k in ("host", "user", "password") if not given.get(k)]
-            st.error("An [smtp] section exists in Secrets, but this is missing or empty: " + ", ".join(missing) + ".")
+def wipe_everything_but_users():
+    """Delete all records and history except the users and their roles. Returns an error text, or None when done."""
+    if not has(CEO):
+        return "Only the CEO can do this."
+    with conn() as c:
+        if IS_PG:
+            c.execute("TRUNCATE " + ", ".join(WIPE) + " RESTART IDENTITY")
         else:
-            st.info("There is no [smtp] section in Streamlit Secrets yet.")
-        st.markdown("""**How to set it up (Gmail is free):**
-1. Use the office mailbox (for example `inchars.office@gmail.com`). Open **Google Account > Security**, turn on **2-Step Verification**, then open **App passwords**, create one called *Inchars* and copy the 16 letters (write them without spaces). Your normal password will not work.
-2. In Streamlit open your app > **Settings > Secrets**, and add the block below **at the very bottom**, under the `DATABASE_URL` line (anything written after `[smtp]` belongs to it).
-3. Press **Save**, then **Reboot app**, then come back to this page and press **Send a test email**.""")
-        st.code('''[smtp]
-host = "smtp.gmail.com"
-port = 465
-user = "inchars.office@gmail.com"
-password = "abcdefghijklmnop"
-sender = "Inchars PD Group <inchars.office@gmail.com>"''', language="toml")
-        return
-    st.markdown(f"Email is **set up**: {cfg['host']}, port {cfg['port']}, sending as {cfg['sender'] or cfg['user']}. Send yourself a test to be sure it works:")
-    to = st.text_input("Your email address", placeholder="you@example.com", key="mail_test_to")
-    if st.button("Send a test email", key="mail_test_go"):
-        if "@" not in to:
-            return st.error("Write a valid email address first.")
-        try:
-            send_email(to.strip(), "Test from Inchars PD Group", "Hello,\n\nThis is a test email from the Inchars app. It works.\n\nInchars PD Group", cfg)
-            st.success(f"Sent to {to.strip()}. If it does not arrive in a minute, look in the spam folder.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"The email could not be sent: {type(e).__name__}: {e}")
-            st.caption("Common causes: for Gmail use an App Password (not your normal password) with host smtp.gmail.com and port 465; a wrong port; a blocked account.")
+            for t in WIPE:
+                c.execute(f"DELETE FROM {t}")
+            try:  # the numbers (job numbers, ids) start again from 1
+                c.execute("DELETE FROM sqlite_sequence WHERE name IN (" + ",".join("?" * len(WIPE)) + ")", tuple(WIPE))
+            except Exception:  # noqa: BLE001
+                pass
+        c.execute("INSERT INTO app_flags(name, value) VALUES('fresh_start', ?)", (f"{datetime.now().isoformat(timespec='seconds')} by {st.session_state.user}",))
+    for k in ("_cache", "jb_open", "jb_saved", "jb_sig", "jb_page"):
+        st.session_state.pop(k, None)
+    return None
+
+
+def reset_page():
+    if not has(CEO):
+        return st.error("Only the CEO can use this page.")
+    if fresh_start_done():
+        return st.success("The data was already cleared. The real data can be recorded now.")
+    st.warning("**Use this only once, when the testing is finished.** Everything below is deleted and **cannot be brought back**.")
+    a, b = st.columns(2)
+    a.markdown("**Deleted**\n\n- all jobs, customers, payments, files and their history\n- all expenses, funds, taxes and debts\n- all materials, stock moves and requests\n- all money requests and the money ledger\n"
+               "- the fields (sites) and the categories, and which user belongs to which field")
+    b.markdown("**Kept**\n\n- all users: names, passwords and roles\n\nAfter this you add your fields and categories again (Fields & categories), give each user his or her field, and start recording the real data.")
+    word = st.text_input("To be sure, type DELETE here", key="fresh_word", placeholder="DELETE")
+    if st.button(":material/delete_forever: Delete all data and start fresh", type="primary", key="fresh_go", disabled=word.strip() != "DELETE") and word.strip() == "DELETE":
+        err = wipe_everything_but_users()
+        if err:
+            return st.error(err)
+        from inchars.widgets import done
+        done("All data and history were deleted. Only the users remain. You can start recording the real data.")

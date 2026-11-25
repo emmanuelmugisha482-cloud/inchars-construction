@@ -197,6 +197,7 @@ SCHEMA = [
         requested_on TEXT, requested_by TEXT, decided_on TEXT, decided_by TEXT, note TEXT, reason TEXT, delivered_on TEXT)""",
     "CREATE INDEX IF NOT EXISTS idx_mr_site ON material_requests(site_id)",
     "CREATE TABLE IF NOT EXISTS user_roles(user_id INTEGER, role TEXT, PRIMARY KEY(user_id, role))",
+    "CREATE TABLE IF NOT EXISTS app_flags(name TEXT PRIMARY KEY, value TEXT)",
     f"CREATE TABLE IF NOT EXISTS money_categories(id {PK}, name TEXT UNIQUE NOT NULL)",
     f"""CREATE TABLE IF NOT EXISTS money_requests(
         id {PK}, site_id INTEGER, category TEXT, purpose TEXT, amount BIGINT, amount_approved BIGINT, needed_by TEXT,
@@ -278,7 +279,7 @@ def init_db():
                     c.execute("ALTER TABLE jobs ADD COLUMN returned_reason TEXT")
                 except sqlite3.OperationalError:
                     pass  # column already there
-            for old, new in (("New", "With CEO"), ("Returned", "With CEO"), ("Assigned", "With engineer"), ("In progress", "With engineer")):
+            for old, new in (("New", "With CEO"), ("Returned", "With CEO"), ("In progress", "Assigned"), ("With engineer", "Assigned"), ("In review", "Done")):  # old names -> current names
                 c.execute("UPDATE jobs SET status=? WHERE status=?", (new, old))
     except Exception:  # noqa: BLE001
         import traceback

@@ -31,7 +31,7 @@ PAGES = {  # key: (file, function, Field drop-down on top?). Loaded only when th
     "setup": ("inchars.construction.admin", "page_setup", False),
     "reports": ("inchars.construction.admin", "reports_page", True),
     "users": ("inchars.construction.admin", "page_users", False),
-    "health": ("inchars.health", "system_check_page", False),
+    "health": ("inchars.health", "reset_page", False),
 }
 
 PAGE_DEFS = [  # key, label, icon, roles that get the page. A user with several roles gets all their pages.
@@ -51,12 +51,20 @@ PAGE_DEFS = [  # key, label, icon, roles that get the page. A user with several 
     ("setup", "Fields & categories", "construction", (CEO, ACCOUNTANT)),
     ("reports", "Reports", "assessment", (CEO, ACCOUNTANT, FIELD)),
     ("users", "Users", "group", (CEO,)),
-    ("health", "System check", "health_and_safety", (CEO,)),
+    ("health", "Start fresh", "delete_forever", (CEO,)),  # one button, used once after testing; it then disappears
 ]
 
 
 def allowed_pages():
-    return [(key, label, icon) for key, label, icon, roles in PAGE_DEFS if has(*roles)]
+    pages = [(key, label, icon) for key, label, icon, roles in PAGE_DEFS if has(*roles)]
+    if any(k == "health" for k, _, _ in pages):
+        try:
+            from inchars.health import fresh_start_done
+            if fresh_start_done():  # the button was used: the page is gone
+                pages = [p for p in pages if p[0] != "health"]
+        except Exception:  # noqa: BLE001  (never hide the menu because of this)
+            pass
+    return pages
 
 
 def load_page(key):
