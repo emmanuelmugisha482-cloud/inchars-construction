@@ -238,9 +238,28 @@ def fetch_job(c, job_id):
     return d
 
 
+# Names the statuses had before. A job still carrying one is moved to the current name (once, and also on screen, so nothing can fail on an old name).
+LEGACY_STATUS = {"New": "With CEO", "Returned": "With CEO", "In progress": "Assigned", "With engineer": "Assigned", "In review": "Done"}
+_migrated = False
+
+
+def migrate_statuses():
+    global _migrated
+    if _migrated:
+        return
+    with conn() as c:
+        for old, new in LEGACY_STATUS.items():
+            c.execute("UPDATE jobs SET status=? WHERE status=?", (new, old))
+    _migrated = True
+
+
 @cached(ttl=8)
 def load_jobs():
     """Every job the signed-in person may see, with the customer, the money (fee, paid, balance) and what we still do not know."""
+    try:
+        migrate_statuses()
+    except Exception:  # noqa: BLE001  (the on-screen mapping below still protects the page)
+        pass
     j = df("""SELECT j.id, j.job_no, j.created_at, j.service, j.title, j.description, j.status, j.stage, j.gov_ref, j.fee, j.due_on,
               j.assigned_to, j.created_by, j.ready_at, j.collected_at, j.collected_by, j.returned_reason, c.id AS customer_id, c.name AS customer,
               (SELECT COUNT(*) FROM job_notices n WHERE n.job_id=j.id AND n.to_user=? AND n.read_at IS NULL) AS unread,
@@ -250,6 +269,7 @@ def load_jobs():
     if not sees_all_jobs():
         j = j[j.assigned_to == st.session_state.user]
     j = j.reset_index(drop=True)
+    j["status"] = j.status.replace(LEGACY_STATUS)
     for col in ("description", "stage", "gov_ref", "due_on", "assigned_to", "ready_at", "collected_at", "collected_by", "customer_email", "phone", "returned_reason"):
         j[col] = j[col].fillna("")  # empty text instead of None, so the screens can test it simply
     j["unread"] = pd.to_numeric(j.unread).fillna(0).astype(int)

@@ -416,10 +416,10 @@ def services_tab(who=None):
     c1, c2 = st.columns(2)
     with c1:
         by = jobs.groupby("status", as_index=False).size().rename(columns={"size": "Jobs"})
-        by["o"] = by.status.map({s: i for i, s in enumerate(STATUS_COLORS)})
+        by["o"] = by.status.map({s: i for i, s in enumerate(STATUS_COLORS)}).fillna(99)
         by = by.sort_values("o")
         with card("Jobs by status", "Where all the jobs are now", by[["status", "Jobs"]], "jstatus"):
-            c_donut(by.rename(columns={"status": "Status"}), "Status", "Jobs", colors=[STATUS_COLORS[s] for s in by.status])
+            c_donut(by.rename(columns={"status": "Status"}), "Status", "Jobs", colors=[STATUS_COLORS.get(s, "#7b8794") for s in by.status])
     with c2:
         sv = jobs.groupby("service", as_index=False).size().rename(columns={"size": "Jobs", "service": "Service"}).sort_values("Jobs", ascending=False)
         with card("Jobs by service", "Number of jobs of each service", sv, "jservice"):

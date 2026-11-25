@@ -25,7 +25,19 @@ PAGE_SIZES = ["10 / page", "20 / page", "50 / page"]
 # the coloured label of each status
 PILL = {"With CEO": ("#e0922f", ""), "Assigned": ("#2f6fb0", ""), "Waiting for customer": ("#b5527f", ""), "Done": ("#7a5fc4", ""),
         "Reverted": ("#f0605d", "\u2715 "), "Ready": ("#2e9b57", "\u2713 "), "Collected": ("#7b8794", ""), "Cancelled": ("#9aa3ad", "")}
-GRID = "display:grid;grid-template-columns:1.25fr 1fr 1.25fr 1.1fr 1.05fr 1fr 1.25fr;gap:8px;align-items:center"
+# solid coloured icons (drawn here, so nothing is downloaded): green eye, blue pencil, blue message, red PDF
+ICON_EYE = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='#1b7a43' d='M12 4.5C6.5 4.5 2.4 8.1 1 12c1.4 3.9 5.5 7.5 11 7.5s9.6-3.6 11-7.5c-1.4-3.9-5.5-7.5-11-7.5z'/><circle cx='12' cy='12' r='4.6' fill='white'/><circle cx='12' cy='12' r='2.6' fill='#1b7a43'/></svg>"
+ICON_PEN = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='#1a3fb5' d='M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25zM20.7 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z'/></svg>"
+ICON_MAIL = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='#1e88e5' d='M4 3h16a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z'/><rect x='6' y='7' width='12' height='1.7' rx='.8' fill='white'/><rect x='6' y='10.5' width='12' height='1.7' rx='.8' fill='white'/><rect x='6' y='14' width='8' height='1.7' rx='.8' fill='white'/></svg>"
+ICON_PDF = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='1.5' y='3' width='21' height='18' rx='3.5' fill='#f0553a'/><text x='12' y='15.4' font-size='8.6' font-weight='bold' text-anchor='middle' fill='white' font-family='Arial,sans-serif'>PDF</text></svg>"
+
+
+def _icon(svg):
+    """An SVG as the background of a button: url("data:image/svg+xml;utf8,...")."""
+    return 'url("data:image/svg+xml;utf8,' + svg.replace("#", "%23").replace('"', "'").replace("<", "%3C").replace(">", "%3E") + '")'
+
+
+GRID = "display:grid;grid-template-columns:1.25fr 1fr 1.6fr 1.2fr 1.1fr 1fr 1.25fr;gap:8px;align-items:center"
 ROW_CSS = f"""<style>
 .jr-h{{{GRID};font-size:.8rem;color:#44525f;font-weight:700;padding:8px 0;border-bottom:2px solid #cfe9f1}}
 .jr{{{GRID};font-size:.92rem;padding:8px 0;border-bottom:1px solid #d9eef4;line-height:1.25}}
@@ -33,13 +45,15 @@ ROW_CSS = f"""<style>
 .jr .newu{{color:#2f6fb0;font-weight:600;font-size:.8rem}}
 .pill{{display:inline-block;color:#fff;border-radius:14px;padding:3px 12px;font-size:.8rem;font-weight:600;white-space:nowrap}}
 .jtitle{{color:#1d9bf0;font-weight:700;font-size:1.15rem}}
-[class*="st-key-jb_eye"] button,[class*="st-key-jb_pen"] button,[class*="st-key-jb_mail"] button,[class*="st-key-jb_pdf"] button,[class*="st-key-jb_paydue"] button,[class*="st-key-jb_payok"] button{{border:none;background:transparent;padding:0;min-height:0;box-shadow:none}}
+[class*="st-key-jb_paydue"] button,[class*="st-key-jb_payok"] button{{border:none;background:transparent;padding:0;min-height:0;box-shadow:none}}
 [class*="st-key-jb_paydue"] button{{color:#c0392b;font-weight:700}}
 [class*="st-key-jb_payok"] button{{color:#1b8a4b;font-weight:700}}
-[class*="st-key-jb_pdf"] button{{color:#d93025}}
-[class*="st-key-jb_eye"] button{{color:#1b8a4b}}
-[class*="st-key-jb_pen"] button{{color:#1d5fd0}}
-[class*="st-key-jb_mail"] button{{color:#e07b00}}
+[class*="st-key-jb_eye"] button,[class*="st-key-jb_pen"] button,[class*="st-key-jb_mail"] button,[class*="st-key-jb_pdf"] button{{border:none;box-shadow:none;width:34px;height:30px;min-height:0;padding:0;background-color:transparent;background-repeat:no-repeat;background-position:center;background-size:24px}}
+[class*="st-key-jb_eye"] button *,[class*="st-key-jb_pen"] button *,[class*="st-key-jb_mail"] button *,[class*="st-key-jb_pdf"] button *{{display:none}}
+[class*="st-key-jb_eye"] button{{background-image:{_icon(ICON_EYE)}}}
+[class*="st-key-jb_pen"] button{{background-image:{_icon(ICON_PEN)}}}
+[class*="st-key-jb_mail"] button{{background-image:{_icon(ICON_MAIL)}}}
+[class*="st-key-jb_pdf"] button{{background-image:{_icon(ICON_PDF)}}}
 </style>"""
 WIDTHS = [8.2, 1.7, 0.5, 0.5, 0.5, 0.5]
 
@@ -106,7 +120,7 @@ def pill(status):
 
 def table_of(view, money):
     """The same rows as the list, for the Excel download."""
-    t = pd.DataFrame({"Date": [when(d) for d in view.created_at], "Job no": view.job_no.values, "Family name": view.surname.values, "First name": view.firstname.values,
+    t = pd.DataFrame({"Date": [when(d) for d in view.created_at], "Job no": view.job_no.values, "Names": view.customer.values, "Phone": view.phone.values, "Email": view.customer_email.values,
                       "Service": view.service.values, "Title": view.title.values, "Engineer": [e or "N/A" for e in view.assigned_to], "Status": view.status.values})
     if money:
         t["Balance"] = view.balance.values
@@ -136,9 +150,10 @@ def job_rows(page_view, unread):
     except Exception:  # noqa: BLE001
         found, read_file = {}, None
     head = st.columns(WIDTHS)
-    head[0].markdown('<div class="jr-h"><span>Job no</span><span>Date</span><span>Family name</span><span>First name</span><span>Service</span><span>Engineer</span><span>Status</span></div>', unsafe_allow_html=True)
+    head[0].markdown('<div class="jr-h"><span>Job no</span><span>Date</span><span>Names</span><span>Phone</span><span>Service</span><span>Engineer</span><span>Status</span></div>', unsafe_allow_html=True)
     head[1].markdown('<div class="jr-h">' + ("Payment" if money else "&nbsp;") + '</div>', unsafe_allow_html=True)
-    for col in head[2:]:
+    head[2].markdown('<div class="jr-h" style="white-space:nowrap">Actions</div>', unsafe_allow_html=True)
+    for col in head[3:]:
         col.markdown('<div class="jr-h">&nbsp;</div>', unsafe_allow_html=True)
     for r in page_view.itertuples():
         job = {"status": r.status, "assigned_to": r.assigned_to, "service": r.service, "balance": r.balance}
@@ -147,8 +162,8 @@ def job_rows(page_view, unread):
         news = f'<br><span class="newu">\u25cf {n} new</span>' if n else ""
         hint = "<br><small>no email</small>" if not r.customer_email else ""
         cells[0].markdown(
-            f'<div class="jr"><span><b>{html.escape(r.job_no)}</b></span><span>{when(r.created_at)[:10]}</span><span><b>{html.escape(r.surname.upper())}</b></span>'
-            f'<span>{html.escape(r.firstname)}{hint}</span><span>{html.escape(r.service)}</span><span>{html.escape(r.assigned_to) if r.assigned_to else "N/A"}</span>'
+            f'<div class="jr"><span><b>{html.escape(r.job_no)}</b></span><span>{when(r.created_at)[:10]}</span><span><b>{html.escape(r.customer)}</b>{hint}</span>'
+            f'<span>{html.escape(r.phone) if r.phone else "-"}</span><span>{html.escape(r.service)}</span><span>{html.escape(r.assigned_to) if r.assigned_to else "N/A"}</span>'
             f'<span>{pill(r.status)}{news}</span></div>', unsafe_allow_html=True)
         if money and r.status != "Cancelled":
             if r.fee <= 0:
