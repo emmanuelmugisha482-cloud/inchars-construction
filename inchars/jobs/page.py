@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 
 from inchars.accounts import has, smtp_conf
 from inchars.jobs.data import (
-    NEED_REASONS, OPEN_STATUSES, PAY_METHODS, PERMIT_STAGES, REVERT_REASONS, SERVICES, assign_job, can, can_act, change_status, create_job, edit_job,
+    can_open_deliverable, NEED_REASONS, OPEN_STATUSES, PAY_METHODS, PERMIT_STAGES, REVERT_REASONS, SERVICES, assign_job, can, can_act, change_status, create_job, edit_job,
     email_status, job_updates, load_customers, load_engineers, load_events, load_jobs, mark_all_read, mark_job_read, missing_info, save_customer,
     sees_all_jobs, sees_money, set_stage, unread_by_job, update_customer_info,
 )
@@ -20,12 +20,12 @@ from inchars.widgets import K, done, due_pick, kpi, kpi_grid, match, pick, run_s
 # the table of jobs (the old Inbox is part of it: each row shows its new updates)
 # ======================================================================
 
-SHOW = ["Open", "Needs me", "New updates", "With CEO", "In review", "Reverted", "Ready", "Waiting", "Missing info", "All"]
+SHOW = ["Open", "Needs me", "New updates", "With CEO", "Done", "Reverted", "Ready", "Waiting", "Missing info", "All"]
 PAGE_SIZES = ["10 / page", "20 / page", "50 / page"]
 # the coloured label of each status
-PILL = {"With CEO": ("#e0922f", ""), "With engineer": ("#2f6fb0", ""), "Waiting for customer": ("#b5527f", ""), "In review": ("#7a5fc4", ""),
+PILL = {"With CEO": ("#e0922f", ""), "Assigned": ("#2f6fb0", ""), "Waiting for customer": ("#b5527f", ""), "Done": ("#7a5fc4", ""),
         "Reverted": ("#f0605d", "\u2715 "), "Ready": ("#2e9b57", "\u2713 "), "Collected": ("#7b8794", ""), "Cancelled": ("#9aa3ad", "")}
-GRID = "display:grid;grid-template-columns:1.45fr 1.25fr 1.25fr 1.05fr 1.1fr 1.35fr;gap:8px;align-items:center"
+GRID = "display:grid;grid-template-columns:1.25fr 1fr 1.25fr 1.1fr 1.05fr 1fr 1.25fr;gap:8px;align-items:center"
 ROW_CSS = f"""<style>
 .jr-h{{{GRID};font-size:.8rem;color:#44525f;font-weight:700;padding:8px 0;border-bottom:2px solid #cfe9f1}}
 .jr{{{GRID};font-size:.92rem;padding:8px 0;border-bottom:1px solid #d9eef4;line-height:1.25}}
@@ -33,12 +33,15 @@ ROW_CSS = f"""<style>
 .jr .newu{{color:#2f6fb0;font-weight:600;font-size:.8rem}}
 .pill{{display:inline-block;color:#fff;border-radius:14px;padding:3px 12px;font-size:.8rem;font-weight:600;white-space:nowrap}}
 .jtitle{{color:#1d9bf0;font-weight:700;font-size:1.15rem}}
-[class*="st-key-jb_eye"] button,[class*="st-key-jb_pen"] button,[class*="st-key-jb_mail"] button{{border:none;background:transparent;padding:0;min-height:0;box-shadow:none}}
+[class*="st-key-jb_eye"] button,[class*="st-key-jb_pen"] button,[class*="st-key-jb_mail"] button,[class*="st-key-jb_pdf"] button,[class*="st-key-jb_paydue"] button,[class*="st-key-jb_payok"] button{{border:none;background:transparent;padding:0;min-height:0;box-shadow:none}}
+[class*="st-key-jb_paydue"] button{{color:#c0392b;font-weight:700}}
+[class*="st-key-jb_payok"] button{{color:#1b8a4b;font-weight:700}}
+[class*="st-key-jb_pdf"] button{{color:#d93025}}
 [class*="st-key-jb_eye"] button{{color:#1b8a4b}}
 [class*="st-key-jb_pen"] button{{color:#1d5fd0}}
 [class*="st-key-jb_mail"] button{{color:#e07b00}}
 </style>"""
-WIDTHS = [9.3, 0.55, 0.55, 0.55]
+WIDTHS = [8.2, 1.7, 0.5, 0.5, 0.5, 0.5]
 
 
 def _fragment(fn):
@@ -57,10 +60,10 @@ def _refresh():
 def needs_me(jobs):
     """The jobs that need this person's action now."""
     if has(CEO):
-        return jobs.status.isin(["With CEO", "In review"]) | jobs.overdue
+        return jobs.status.isin(["With CEO", "Done"]) | jobs.overdue
     if has(RECEPTIONIST):
         return jobs.status.isin(["Ready", "Waiting for customer"])
-    return jobs.status.isin(["With engineer", "Reverted"])  # the Engineer
+    return jobs.status.isin(["Assigned", "Reverted"])  # the Engineer
 
 
 def apply_show(jobs, show, unread):
@@ -81,7 +84,7 @@ def apply_show(jobs, show, unread):
 
 def summary_line(jobs, unread):
     n = lambda mask: int(mask.sum())
-    parts = [f"{n(jobs.status.isin(OPEN_STATUSES))} open", f"{n(jobs.status == 'With CEO')} with the CEO", f"{n(jobs.status == 'In review')} waiting for the CEO's check",
+    parts = [f"{n(jobs.status.isin(OPEN_STATUSES))} open", f"{n(jobs.status == 'With CEO')} with the CEO", f"{n(jobs.status == 'Done')} waiting for the CEO's check",
              f"{n(jobs.status == 'Reverted')} sent back", f"{n(jobs.status == 'Ready')} ready", f"{n(jobs.overdue)} overdue"]
     if unread:
         parts.append(f"{sum(unread.values())} new update(s)")
@@ -112,9 +115,9 @@ def table_of(view, money):
     return t
 
 
-def open_job(job_id, mode):
-    """The eye (view) and the pencil (edit) take you to the page of that job."""
-    st.session_state.jb_open, st.session_state.jb_mode = int(job_id), mode
+def open_job(job_id, mode, part="Work"):
+    """The eye (view) and the pencil (edit) take you to the page of that job. `part` says which part opens first (Work, Money...)."""
+    st.session_state.jb_open, st.session_state.jb_mode, st.session_state.jb_part = int(job_id), mode, part
     st.session_state.jb_ver = st.session_state.get("jb_ver", 0) + 1
     try:
         st.rerun(scope="app")
@@ -123,11 +126,20 @@ def open_job(job_id, mode):
 
 
 def job_rows(page_view, unread):
-    """One line per job like a register book. Eye = read the job. Pencil = work on it (only if there is something to do). Mail = email the customer the status."""
+    """One line per job like a register book. Payment (CEO, Receptionist): what is still to pay, click to record a payment. Eye: read the job.
+    Pencil: work on it. Mail: email the customer the status. PDF: the final document, when the job is paid in full."""
     st.markdown(ROW_CSS, unsafe_allow_html=True)
+    money = sees_money()
+    try:
+        from inchars.jobs.extras import deliverable_map, read_file  # read here: if the Files file has a problem the table still works
+        found = deliverable_map() if money else {}
+    except Exception:  # noqa: BLE001
+        found, read_file = {}, None
     head = st.columns(WIDTHS)
-    head[0].markdown('<div class="jr-h"><span>Date</span><span>Family name</span><span>First name</span><span>Service</span><span>Engineer</span><span>Status</span></div>', unsafe_allow_html=True)
-    head[1].markdown('<div class="jr-h">&nbsp;</div>', unsafe_allow_html=True)
+    head[0].markdown('<div class="jr-h"><span>Job no</span><span>Date</span><span>Family name</span><span>First name</span><span>Service</span><span>Engineer</span><span>Status</span></div>', unsafe_allow_html=True)
+    head[1].markdown('<div class="jr-h">' + ("Payment" if money else "&nbsp;") + '</div>', unsafe_allow_html=True)
+    for col in head[2:]:
+        col.markdown('<div class="jr-h">&nbsp;</div>', unsafe_allow_html=True)
     for r in page_view.itertuples():
         job = {"status": r.status, "assigned_to": r.assigned_to, "service": r.service, "balance": r.balance}
         cells = st.columns(WIDTHS, vertical_alignment="center")
@@ -135,16 +147,29 @@ def job_rows(page_view, unread):
         news = f'<br><span class="newu">\u25cf {n} new</span>' if n else ""
         hint = "<br><small>no email</small>" if not r.customer_email else ""
         cells[0].markdown(
-            f'<div class="jr"><span>{when(r.created_at)}</span><span><b>{html.escape(r.surname.upper())}</b></span><span>{html.escape(r.firstname)}{hint}</span>'
-            f'<span>{html.escape(r.service)}</span><span>{html.escape(r.assigned_to) if r.assigned_to else "N/A"}</span><span>{pill(r.status)}{news}</span></div>',
-            unsafe_allow_html=True)
-        if cells[1].button(":material/visibility:", key=f"jb_eye{r.id}", help="View this job"):
+            f'<div class="jr"><span><b>{html.escape(r.job_no)}</b></span><span>{when(r.created_at)[:10]}</span><span><b>{html.escape(r.surname.upper())}</b></span>'
+            f'<span>{html.escape(r.firstname)}{hint}</span><span>{html.escape(r.service)}</span><span>{html.escape(r.assigned_to) if r.assigned_to else "N/A"}</span>'
+            f'<span>{pill(r.status)}{news}</span></div>', unsafe_allow_html=True)
+        if money and r.status != "Cancelled":
+            if r.fee <= 0:
+                cells[1].markdown('<div class="jr" style="display:block;color:#8a96a3">no fee</div>', unsafe_allow_html=True)
+            elif r.balance <= 0:
+                if cells[1].button("\u2713 Paid", key=f"jb_payok{r.id}", help="Paid in full. Open the payments of this job"):
+                    open_job(r.id, "edit", "Money")
+            elif cells[1].button(f"{r.balance:,.0f} Frw to pay", key=f"jb_paydue{r.id}", help="Click to record a payment"):
+                open_job(r.id, "edit", "Money")
+        if cells[2].button(":material/visibility:", key=f"jb_eye{r.id}", help="View this job"):
             open_job(r.id, "view")
-        if can_act(job) and cells[2].button(":material/edit:", key=f"jb_pen{r.id}", help="Work on this job: review, send back, assign, add information..."):
+        if can_act(job) and cells[3].button(":material/edit:", key=f"jb_pen{r.id}", help="Work on this job: review, send back, assign, add information..."):
             open_job(r.id, "edit")
-        if can("notify", job) and cells[3].button(":material/mail:", key=f"jb_mail{r.id}", help="Email the customer the status of this job"):
+        if can("notify", job) and cells[4].button(":material/mail:", key=f"jb_mail{r.id}", help="Email the customer the status of this job"):
             st.session_state.jb_msg = email_status(int(r.id))
             _refresh()
+        if money and read_file and int(r.id) in found and r.status in ("Ready", "Collected") and r.balance <= 0 and can_open_deliverable(job):
+            fid, fname = found[int(r.id)]
+            data = read_file(fid)
+            if data:
+                cells[5].download_button(":material/picture_as_pdf:", data, file_name=fname, mime="application/pdf", key=f"jb_pdf{r.id}", help="Download the final document for the customer")
 
 
 def page_numbers(page, pages):
@@ -200,7 +225,7 @@ def jobs_tab():
     page = min(st.session_state.get("jb_page", 0), pages - 1)
     with st.container(border=True):
         t1, t2 = st.columns([9, 1], vertical_alignment="center")
-        t1.markdown(f'<span class="jtitle">All jobs ({len(view)})</span> &nbsp; <small style="color:#8a96a3">eye: read \u00b7 pencil: work on it \u00b7 mail: email the customer the status</small>', unsafe_allow_html=True)
+        t1.markdown(f'<span class="jtitle">All jobs ({len(view)})</span> &nbsp; <small style="color:#8a96a3">payment: click to record \u00b7 eye: read \u00b7 pencil: work \u00b7 mail: email status \u00b7 pdf: final document</small>', unsafe_allow_html=True)
         if len(view):
             t2.download_button(":material/download:", to_excel({"Jobs": table_of(view, money)}), f"jobs_{date.today()}.xlsx", mime=XLSX, key="dl_jobs", help="Download Excel")
         if unread and st.button("Mark all updates as read", key="jb_readall"):
@@ -250,7 +275,7 @@ def jobs_page():
         n = int(load_jobs().unread.sum())
     except Exception:  # noqa: BLE001  (the number is a nicety: the page works without it)
         n = 0
-    names = [f"Jobs ({n} new)" if n else "Jobs"] + (["New job"] if has(CEO, RECEPTIONIST) else []) + (["Payments"] if sees_money() else [])
+    names = [f"Jobs ({n} new)" if n else "Jobs"] + (["New job"] if has(CEO, RECEPTIONIST) else []) + (["Payments"] if has(CEO) else [])
     section = names[0] if len(names) == 1 else st.radio("Section", names, horizontal=True, key="jb_section", label_visibility="collapsed")
     if section not in names:  # the number in the label changed
         section = names[0]
@@ -279,18 +304,20 @@ def new_job_form():
             row = cust[cust.id == cid].iloc[0]
             email = row.Email or ""
             lacking = missing_info(row.Phone, row.Email)
-            if lacking:  # the 'information we do not have' bar: optional
-                st.info("Information we do not have: " + " and ".join(l for _, l in lacking) + ". Not required: add it now if the customer is here.")
-                cols = st.columns(len(lacking))
-                for (col, label), box in zip(lacking, cols):
-                    extra[col] = box.text_input(label.capitalize(), key=K(f"nj_x{col}"), placeholder="0788 123 456" if col == "phone" else "name@example.com")
+            if lacking:
+                st.info("Information we do not have: " + " and ".join(l for _, l in lacking) + ". Not required.")
+            st.caption("You can change this customer's email or phone here. Leave them as they are if nothing changed.")
+            x1, x2 = st.columns(2)
+            extra["email"] = x1.text_input("Email", value=row.Email or "", key=K(f"nj_xemail{cid}"), placeholder="name@example.com")
+            extra["phone"] = x2.text_input("Phone number", value=row.Phone or "", key=K(f"nj_xphone{cid}"), placeholder="0788 123 456")
+            extra["_was"] = (row.Email or "", row.Phone or "")
     else:
         a, b = st.columns(2)
         new = {"name": a.text_input("Name", key=K("nj_n"), placeholder="Family name first, for example MUKAMWIZA Isabelle"),
                "email": b.text_input("Email (optional)", key=K("nj_e"), placeholder="name@example.com"),
                "phone": a.text_input("Phone number (optional)", key=K("nj_p"), placeholder="0788 123 456")}
         email = new["email"]
-        st.caption("With an email address we keep the customer informed by email. Without it we can add it later.")
+        st.caption("With an email address we keep the customer informed by email. Without it we can add it later. Two customers may share the same email or phone (a family, an office).")
     service = pick("Service", SERVICES, K("nj_s"), default=SERVICES[0])
     a, b = st.columns([3, 2])
     title = a.text_input("Title", placeholder="For example: 3-bedroom house design, Kicukiro", key=K("nj_t"))
@@ -298,7 +325,7 @@ def new_job_form():
     due = due_pick(K("nj_due"), date.today() + timedelta(days=7))
     a, b = st.columns(2)
     deposit = a.number_input("Deposit paid now (Frw, optional)", min_value=0, step=1000, value=None, placeholder="0", key=K("nj_dep"))
-    method = pick("Deposit paid by", PAY_METHODS, K("nj_m"), default="Cash") or "Cash"
+    method = pick("Deposit paid by", PAY_METHODS, K("nj_m"), default="Mobile money") or "Mobile money"
     with st.expander("Add the customer's documents (optional)"):
         up = st.file_uploader("PDF, JPG or PNG", type=["pdf", "jpg", "jpeg", "png"], accept_multiple_files=True, key=K("nj_u"))
     if st.button("Register the job", type="primary", key=K("nj_go")):
@@ -308,7 +335,7 @@ def new_job_form():
                 return st.error(err)
         if not cid:
             return st.warning("Choose the customer.")
-        if any((v or "").strip() for v in extra.values()):  # the optional bar was filled in
+        if mode == "Existing customer" and extra and (extra.get("email", ""), extra.get("phone", "")) != extra.get("_was"):  # changed or added
             err = update_customer_info(cid, extra.get("phone", ""), extra.get("email", ""))
             if err:
                 return st.error(err)
@@ -380,10 +407,10 @@ def work_section(j, p):
         st.caption("Open the Files part to read what the engineer attached.")
         if st.button(":material/check_circle: Confirm: the work is good", type="primary", key=K(k + "confirm")):
             _do(change_status(jid, "confirm"), "Confirmed. The Receptionist was told and the customer was emailed that the work is ready.")
-        with st.expander("Send it back to the engineer (with a reason)"):
-            why = _reasons("What is wrong", REVERT_REASONS, k + "rev")
-            if st.button("Send back", key=K(k + "revert"), disabled=not why):
-                _do(change_status(jid, "revert", why), "Sent back. The engineer was told.")
+        st.markdown("**Or revert it:** send it back to the engineer")
+        why = _reasons("What is wrong", REVERT_REASONS, k + "rev")
+        if st.button(":material/undo: Revert: send back to the engineer", key=K(k + "revert"), disabled=not why):
+            _do(change_status(jid, "revert", why), "Reverted. The engineer was told.")
     if can("assign", j):
         shown = True
         st.markdown("**Give the job to an engineer**" if not j.assigned_to else "**Change the engineer**")
@@ -398,10 +425,10 @@ def work_section(j, p):
     if can("submit", j):
         shown = True
         st.markdown("**When the work is finished**")
-        st.caption("You can attach the finished PDF in the Files part (optional). Then send the work to the CEO.")
+        st.caption("Attach the finished PDF in the Files part (the customer gets it when the job is paid). Then mark the job as done: the CEO is told and checks it.")
         note = st.text_input("Note for the CEO (optional)", key=K(k + "subn"))
-        if st.button(":material/send: Send to the CEO", type="primary", key=K(k + "submit")):
-            _do(change_status(jid, "submit", note), "Sent to the CEO.")
+        if st.button(":material/check_circle: Mark as done", type="primary", key=K(k + "submit")):
+            _do(change_status(jid, "submit", note), "Marked as done. The CEO was told and will confirm or revert it.")
     if can("stage", j):
         shown = True
         with st.expander("Building permit: where is the file?"):
@@ -446,6 +473,17 @@ def work_section(j, p):
 # ---------------------------------------------------------------- Details: change the job, cancel it
 def details_section(j, p):
     jid, k = int(j.id), f"{p}{int(j.id)}_"
+    if can("set_contact", j):
+        st.markdown("**The customer's email and phone** (change them when the customer gives new ones)")
+        a, b = st.columns(2)
+        em = a.text_input("Email", value=j.customer_email or "", key=K(k + "ce"), placeholder="name@example.com")
+        ph = b.text_input("Phone number", value=j.phone or "", key=K(k + "cp"), placeholder="0788 123 456")
+        if st.button("Save the customer's details", key=K(k + "cb")):
+            if (em.strip(), ph.strip()) == ((j.customer_email or "").strip(), (j.phone or "").strip()):
+                st.info("Nothing changed.")
+            else:
+                _do(update_customer_info(int(j.customer_id), ph, em), "The customer's details were saved.")
+        st.divider()
     if can("edit", j):
         title = st.text_input("Title", value=j.title, key=K(k + "et"))
         desc = st.text_area("Description", value=j.description or "", key=K(k + "ed"))
@@ -513,7 +551,7 @@ def job_panel(job_id, p="jb"):
         cards = [kpi("Status", j.status, ("stage: " + j.stage) if j.stage else "where the job is now"),
                  kpi("Engineer", j.assigned_to or "not given yet", "doing the work", small=True),
                  kpi("Promised", j.due_on or "-", "overdue" if j.overdue else "date given to the customer")]
-        if money:
+        if has(CEO):
             cards.append(kpi("Balance", f"{j.balance:,.0f}", "paid in full" if j.balance <= 0 else f"Frw to pay · fee {j.fee:,.0f}"))
         kpi_grid(cards)
         if mode != "edit":
@@ -522,7 +560,8 @@ def job_panel(job_id, p="jb"):
             st.caption(j.description)
         job = {"status": j.status, "assigned_to": j.assigned_to, "service": j.service}
         parts = ["Work"] + (["Details"] if can("edit", job) or can("cancel", job) else []) + ["Files"] + (["Money"] if money else []) + ["History"]
-        part = st.selectbox("Part of the job", parts, key=K(f"{p}part{int(j.id)}_{st.session_state.get(p + '_ver', 0)}"))
+        want = st.session_state.get(p + "_part")
+        part = st.selectbox("Part of the job", parts, index=parts.index(want) if want in parts else 0, key=K(f"{p}part{int(j.id)}_{st.session_state.get(p + '_ver', 0)}"))
         where = {"Work": ("inchars.jobs.page", "work_section"), "Details": ("inchars.jobs.page", "details_section"), "Files": ("inchars.jobs.extras", "files_section"),
                  "Money": ("inchars.jobs.extras", "money_section"), "History": ("inchars.jobs.page", "history_section")}[part]
         run_section(where[0], where[1], j, p)

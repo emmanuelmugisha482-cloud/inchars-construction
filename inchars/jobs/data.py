@@ -19,12 +19,12 @@ from inchars.settings import CEO, EMAIL_RE, ENGINEER, RECEPTIONIST
 
 SERVICES = ["Consultancy", "House design", "Building permit", "Other"]
 PERMIT = "Building permit"
-# The way of a job: registered -> With CEO -> (CEO gives it to an engineer) With engineer -> (engineer finishes) In review ->
+# The way of a job: registered -> With CEO -> (CEO gives it to an engineer) Assigned -> (engineer finishes) Done ->
 # the CEO confirms -> Ready (with the Receptionist, the customer is emailed) -> Collected.   Or the CEO reverts it -> Reverted (back to the engineer).
-JOB_STATUSES = ["With CEO", "With engineer", "Waiting for customer", "In review", "Reverted", "Ready", "Collected", "Cancelled"]
-OPEN_STATUSES = ["With CEO", "With engineer", "Waiting for customer", "In review", "Reverted", "Ready"]
+JOB_STATUSES = ["With CEO", "Assigned", "Waiting for customer", "Done", "Reverted", "Ready", "Collected", "Cancelled"]
+OPEN_STATUSES = ["With CEO", "Assigned", "Waiting for customer", "Done", "Reverted", "Ready"]
 PERMIT_STAGES = ["Documents collected", "Submitted to government", "Under review", "Corrections requested", "Approved"]
-PAY_METHODS = ["Cash", "Mobile money", "Bank transfer", "Other"]
+PAY_METHODS = ["Mobile money", "Bank transfer", "Other"]
 MAX_FILE_MB = 15  # per file; files are kept in the database (see files.py to move them to an online file store)
 
 NEED_REASONS = ["Copy of ID card", "Land title / UPI", "Site plan or map", "Payment", "Other documents"]  # what the customer must bring: tap
@@ -33,9 +33,9 @@ REVERT_REASONS = ["Needs correction", "Information is missing", "Not clear enoug
 # What the customer is told when the CEO or the Receptionist presses the email button of a job.
 STATUS_LINES = {
     "With CEO": "Your request is with our management, who will give it to the right engineer.",
-    "With engineer": "An engineer is working on your request.",
+    "Assigned": "An engineer is working on your request.",
     "Waiting for customer": "We are waiting for something from you before we can continue. Please contact our office.",
-    "In review": "The work is finished and is being checked before we give it to you.",
+    "Done": "The work is finished and is being checked before we give it to you.",
     "Reverted": "We are making some final improvements to the work.",
     "Ready": "Your work is ready. Please come to our office and tell us your job number.",
     "Collected": "Your work was handed over to you. Thank you for working with us.",
@@ -134,15 +134,15 @@ def can(action, job):
     me = st.session_state.user
     s = job["status"]
     eng = has(ENGINEER) and job["assigned_to"] == me
-    working = s in ("With engineer", "Reverted")
+    working = s in ("Assigned", "Reverted")
     if action == "assign":
         return has(CEO) and s in OPEN_STATUSES
     if action == "submit":  # the engineer finished: send to the CEO
         return eng and working
     if action in ("confirm", "revert"):  # the CEO checks the finished work
-        return has(CEO) and s == "In review"
+        return has(CEO) and s == "Done"
     if action == "wait":  # ask the customer for something
-        return (eng or has(CEO)) and s in ("With engineer", "Reverted", "In review")
+        return (eng or has(CEO)) and s in ("Assigned", "Reverted", "Done")
     if action == "resume":
         return (eng or has(CEO, RECEPTIONIST)) and s == "Waiting for customer"
     if action == "collect":
@@ -152,7 +152,7 @@ def can(action, job):
     if action == "reopen":
         return has(CEO) and s in ("Collected", "Cancelled")
     if action == "stage":
-        return job["service"] == PERMIT and (eng or has(CEO, RECEPTIONIST)) and s in ("With engineer", "Reverted", "Waiting for customer", "In review")
+        return job["service"] == PERMIT and (eng or has(CEO, RECEPTIONIST)) and s in ("Assigned", "Reverted", "Waiting for customer", "Done")
     if action == "edit":
         return has(CEO, RECEPTIONIST) and s in OPEN_STATUSES
     if action == "set_contact":  # add the email or phone of the customer, at any time, for example when he or she comes back
@@ -162,7 +162,7 @@ def can(action, job):
     if action == "upload_customer":
         return (has(CEO, RECEPTIONIST) or eng) and s in OPEN_STATUSES
     if action == "upload_deliverable":
-        return (eng or has(CEO)) and s in ("With engineer", "Reverted", "Waiting for customer", "In review", "Ready")
+        return (eng or has(CEO)) and s in ("Assigned", "Reverted", "Waiting for customer", "Done", "Ready")
     if action == "notify":  # email the customer the status of the job, by hand
         return has(CEO, RECEPTIONIST) and s != "Cancelled"
     if action in ("see_files", "note"):
@@ -185,7 +185,7 @@ def load_customers():
 
 
 def save_customer(name, phone="", email="", note="", customer_id=None):
-    """Add or change a customer. Only the name is required. Returns (customer_id, error)."""
+    """Add or change a customer. Only the name is required. Two customers may share a phone number or an email (a family, an office). Returns (customer_id, error)."""
     name, phone, email = (name or "").strip(), (phone or "").strip(), (email or "").strip()
     if not name:
         return None, "Write the customer's name."
@@ -195,10 +195,6 @@ def save_customer(name, phone="", email="", note="", customer_id=None):
         return None, "The email address is not valid. You can also leave it empty."
     phone = clean_phone(phone)
     with conn() as c:
-        if phone:
-            for r in c.execute("SELECT id, name, phone FROM customers").fetchall():
-                if clean_phone(r["phone"]) == phone and r["id"] != customer_id:
-                    return None, f"This phone number already belongs to {r['name']}. Choose that customer instead."
         if customer_id:
             c.execute("UPDATE customers SET name=?, phone=?, email=?, note=? WHERE id=?", (name, phone, email, (note or "").strip(), int(customer_id)))
             return int(customer_id), None
@@ -220,9 +216,6 @@ def update_customer_info(customer_id, phone="", email=""):
         return "The email address is not valid."
     with conn() as c:
         if phone:
-            for r in c.execute("SELECT id, name, phone FROM customers").fetchall():
-                if clean_phone(r["phone"]) == clean_phone(phone) and r["id"] != int(customer_id):
-                    return f"This phone number already belongs to {r['name']}."
             c.execute("UPDATE customers SET phone=? WHERE id=?", (clean_phone(phone), int(customer_id)))
         if email:
             c.execute("UPDATE customers SET email=? WHERE id=?", (email, int(customer_id)))
@@ -399,7 +392,7 @@ def _next_job_no(c):
 
 
 @after_commit
-def create_job(customer_id, service, title, description, fee, due_on, deposit=0, method="Cash", reference=""):
+def create_job(customer_id, service, title, description, fee, due_on, deposit=0, method="Mobile money", reference=""):
     """Register a job. It goes straight to the CEO. Returns (job_id, job_no, error). The customer gets a thank-you email (if there is an address)."""
     if not has(CEO, RECEPTIONIST):
         return None, None, "Only the Receptionist or the CEO can register a job."
@@ -426,7 +419,7 @@ def create_job(customer_id, service, title, description, fee, due_on, deposit=0,
                 log_event(c, jid, "Registered", f"{service} for {cust['name']}. Fee {fee:,} Frw. Sent to the CEO.")
                 if deposit:
                     c.execute("INSERT INTO job_payments(job_id, amount, method, reference, paid_on, received_by, note, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                              (jid, deposit, method if method in PAY_METHODS else "Cash", (reference or "").strip(), str(date.today()), me, "Deposit", now()))
+                              (jid, deposit, method if method in PAY_METHODS else "Mobile money", (reference or "").strip(), str(date.today()), me, "Deposit", now()))
                     log_event(c, jid, "Payment", f"Deposit {deposit:,} Frw ({method}).")
                 notify(c, jid, usernames_with_role(c, CEO), f"New job {job_no}: {service} for {cust['name']}. Waiting for your decision: give it to an engineer, or send it back.")
                 tell_customer(c, jid, "registered")
@@ -447,7 +440,7 @@ def assign_job(job_id, engineer, due_on):
             return "Choose an engineer."
         old = j["assigned_to"]
         due = str(due_on) if due_on else j["due_on"]
-        c.execute("UPDATE jobs SET assigned_to=?, due_on=?, status=? WHERE id=?", (engineer, due, "With engineer" if j["status"] == "With CEO" else j["status"], int(job_id)))
+        c.execute("UPDATE jobs SET assigned_to=?, due_on=?, status=? WHERE id=?", (engineer, due, "Assigned" if j["status"] == "With CEO" else j["status"], int(job_id)))
         log_event(c, job_id, "Given to an engineer" if not old else "Engineer changed", f"{engineer}" + (f" (was {old})" if old and old != engineer else "") + (f", due {due_on}" if due_on else ""))
         notify(c, job_id, [engineer], f"Job {j['job_no']} was given to you: {j['service']} for {j['customer']}" + (f". Due {due_on}." if due_on else "."))
         if old and old != engineer:
@@ -471,9 +464,9 @@ def change_status(job_id, action, note="", override=False):
         eng = [j["assigned_to"]] if j["assigned_to"] else []
         jid = int(job_id)
         if action == "submit":
-            c.execute("UPDATE jobs SET status='In review' WHERE id=?", (jid,))
-            log_event(c, job_id, "Sent to the CEO", note or "The work is finished.")
-            notify(c, job_id, ceos, f"Job {no} ({cust}) is finished and waits for your check." + (f" Note: {note}" if note else ""))
+            c.execute("UPDATE jobs SET status='Done' WHERE id=?", (jid,))
+            log_event(c, job_id, "Marked as done", note or "The work is finished.")
+            notify(c, job_id, ceos, f"Job {no} ({cust}) was marked as DONE by {me} and waits for your check." + (f" Note: {note}" if note else ""))
         elif action == "confirm":
             c.execute("UPDATE jobs SET status='Ready', ready_at=? WHERE id=?", (now(), jid))
             log_event(c, job_id, "Confirmed by the CEO", note or "The work is approved.")
@@ -493,7 +486,7 @@ def change_status(job_id, action, note="", override=False):
             notify(c, job_id, recs + ceos, f"Job {no} ({cust}) is waiting for the customer: {note}")
             tell_customer(c, job_id, "need", what=note)
         elif action == "resume":
-            c.execute("UPDATE jobs SET status='With engineer' WHERE id=?", (jid,))
+            c.execute("UPDATE jobs SET status='Assigned' WHERE id=?", (jid,))
             log_event(c, job_id, "Work continues", note or "The customer answered.")
             notify(c, job_id, eng, f"Job {no} ({cust}): the customer answered, work can continue." + (f" {note}" if note else ""))
         elif action == "collect":
@@ -513,7 +506,7 @@ def change_status(job_id, action, note="", override=False):
         elif action == "reopen":
             if not note:
                 return "Write why the job is reopened."
-            c.execute("UPDATE jobs SET status=?, collected_at=NULL, collected_by=NULL WHERE id=?", ("With engineer" if j["assigned_to"] else "With CEO", jid))
+            c.execute("UPDATE jobs SET status=?, collected_at=NULL, collected_by=NULL WHERE id=?", ("Assigned" if j["assigned_to"] else "With CEO", jid))
             log_event(c, job_id, "Reopened", note)
             notify(c, job_id, eng or ceos, f"Job {no} ({cust}) was reopened: {note}")
     return None

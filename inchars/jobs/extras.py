@@ -88,6 +88,13 @@ def list_files(job_id):
     return df("SELECT id, kind, filename, mime, size, uploaded_by, uploaded_at FROM job_files WHERE job_id=? ORDER BY id DESC", (int(job_id),))
 
 
+@cached(ttl=8)
+def deliverable_map():
+    """{job_id: (file_id, filename)}: the newest finished PDF of each job, found with one question for the whole table."""
+    r = df("SELECT job_id, id, filename FROM job_files WHERE kind='Deliverable' ORDER BY id")
+    return {int(a): (int(b), c) for a, b, c in zip(r.job_id, r.id, r.filename)}
+
+
 def read_file(file_id):
     """The bytes of one file (None when it does not exist)."""
     with conn() as c:
@@ -268,7 +275,7 @@ def money_section(j, p):
         amount = quick.get(choice)
         if choice == "Other amount" or choice is None:
             amount = st.number_input("Amount (Frw)", min_value=0, max_value=bal, step=1000, value=None, placeholder=f"up to {bal:,}", key=K(k + "pa"))
-        method = pick("Paid by", PAY_METHODS, K(k + "pm"), default="Cash") or "Cash"
+        method = pick("Paid by", PAY_METHODS, K(k + "pm"), default="Mobile money") or "Mobile money"
         a, b = st.columns(2)
         ref = a.text_input("Reference (optional)", key=K(k + "pr"), placeholder="Receipt or transaction number")
         day = b.date_input("Date", date.today(), max_value=date.today(), key=K(k + "pd"))
@@ -316,7 +323,7 @@ def payments_tab():
 # from services/dashboard.py
 # ======================================================================
 
-STATUS_COLORS = {"With CEO": "#e0922f", "With engineer": "#2f6fb0", "Waiting for customer": "#b5527f", "In review": "#7a5fc4", "Reverted": "#f0605d", "Ready": "#2e9b57", "Collected": "#7b8794", "Cancelled": "#9aa3ad"}
+STATUS_COLORS = {"With CEO": "#e0922f", "Assigned": "#2f6fb0", "Waiting for customer": "#b5527f", "Done": "#7a5fc4", "Reverted": "#f0605d", "Ready": "#2e9b57", "Collected": "#7b8794", "Cancelled": "#9aa3ad"}
 
 
 def _last_months(n=6):
@@ -346,7 +353,7 @@ def service_cards(jobs, pays, who):
     coll_month = int((jobs.collected_at.astype(str).str[:7] == month).sum())
     if who == "boss":
         return [kpi("Open jobs", len(open_), "not collected yet", "blue", spark_svg(reg_m, labs, "#2f6fb0"), trend(reg_m[-1], reg_m[-2], labs[-2], lambda v: f"{v:,.0f}")),
-                kpi("Needs your decision", int(jobs.status.isin(["With CEO", "In review"]).sum()), "to assign, or to check", "amber" if jobs.status.isin(["With CEO", "In review"]).any() else "green"),
+                kpi("Needs your decision", int(jobs.status.isin(["With CEO", "Done"]).sum()), "to assign, or to check", "amber" if jobs.status.isin(["With CEO", "Done"]).any() else "green"),
                 kpi("Ready for the customer", len(ready), "document finished", "green"),
                 kpi("Overdue", overdue, "past the promised date", "red" if overdue else "green"),
                 kpi("Still to pay", money(unpaid.balance.sum()) if len(unpaid) else "0", f"Frw · {len(unpaid)} job(s)", "red" if len(unpaid) else "green"),
@@ -355,10 +362,10 @@ def service_cards(jobs, pays, who):
         return [kpi("Open jobs", len(open_), "not collected yet", "blue", spark_svg(reg_m, labs, "#2f6fb0"), trend(reg_m[-1], reg_m[-2], labs[-2], lambda v: f"{v:,.0f}")),
                 kpi("Ready to hand over", len(ready), f"{int((ready.balance > 0).sum())} not paid in full", "green" if not (ready.balance > 0).any() else "amber"),
                 kpi("Waiting for customer", len(waiting), "an engineer needs something", "amber" if len(waiting) else "green"),
-                kpi("Still to pay", money(unpaid.balance.sum()) if len(unpaid) else "0", f"Frw · {len(unpaid)} job(s)", "red" if len(unpaid) else "green"),
+                kpi("Customer details missing", int((open_.missing != "").sum()), "open jobs with no email or phone", "amber" if (open_.missing != "").any() else "green"),
                 kpi("Registered this month", int(reg_m[-1]), "new jobs", "blue"),
                 kpi("Collected this month", coll_month, "documents handed over", "grey")]
-    todo = int(jobs.status.isin(["With engineer", "Reverted"]).sum())
+    todo = int(jobs.status.isin(["Assigned", "Reverted"]).sum())
     finished = int((jobs.ready_at.astype(str).str[:7] == month).sum())
     return [kpi("My open jobs", len(open_), "not collected yet", "blue"),
             kpi("To do", todo, "given to you, or sent back to you", "amber" if todo else "green"),
@@ -380,7 +387,7 @@ def service_says(jobs, who):
     if len(ready):
         unpaid = ready[ready.balance > 0]
         if who != "engineer" and len(unpaid):
-            says.append((AMBER, f"<b>Ready but not paid:</b> {len(unpaid)} finished job(s) cannot be handed over before payment ({money(unpaid.balance.sum())} Frw)."))
+            says.append((AMBER, f"<b>Ready but not paid:</b> {len(unpaid)} finished job(s) cannot be handed over before payment" + (f" ({money(unpaid.balance.sum())} Frw)." if who == "boss" else ".")))
         else:
             says.append((GREEN, f"<b>Ready:</b> {len(ready)} finished job(s) are waiting for the customer."))
     wait = jobs[jobs.status == "Waiting for customer"]
@@ -405,7 +412,7 @@ def services_tab(who=None):
     st.markdown('<div class="dsec">What the data says</div>', unsafe_allow_html=True)
     insights_html(service_says(jobs, who))
     st.markdown('<div class="dsec">Analysis</div><div class="dcap">Hover a chart for the exact value. Every chart has a Download data button.</div>', unsafe_allow_html=True)
-    money_ok = who != "engineer"
+    money_ok = who == "boss"  # the receptionist sees what is owed in the Jobs table, not in graphs
     c1, c2 = st.columns(2)
     with c1:
         by = jobs.groupby("status", as_index=False).size().rename(columns={"size": "Jobs"})
